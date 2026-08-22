@@ -8,8 +8,8 @@ from typing import Any, Dict, Tuple
 import torch
 
 from gen_worker._vendor.torchcg import CallIngress, CallInput
-from gen_worker._vendor.torchcg.adopt import AdoptSession, _forward_parameters
-from gen_worker._vendor.torchcg.document import (
+from gen_worker.graphs.adopt import AdoptSession, _forward_parameters
+from gen_worker.graphs.document import (
     GraphRecord,
     GraphSetDocument,
     LaneGraphs,

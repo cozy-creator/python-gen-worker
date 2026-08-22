@@ -13,8 +13,8 @@ import pytest
 
 from gen_worker import activity as activity_mod
 from gen_worker import compile_posture
-from gen_worker._vendor.torchcg.graph_identity import EnvIdentity
-from gen_worker._vendor.torchcg.serve import materialize
+from gen_worker.graphs.env import ArtifactEnv as EnvIdentity
+from gen_worker._vendor.torchcg.store import open_artifact
 from gen_worker.serving import mint
 from gen_worker.serving.mint_store import graph_store
 
@@ -45,7 +45,7 @@ class _Adoption:
     def arm(self, record: Any, artifact: Path) -> None:
         if self.arm_raises is not None:
             raise self.arm_raises
-        materialize(Path(artifact), Path(artifact).parent / "unpacked")
+        open_artifact(Path(artifact), Path(artifact).parent / "unpacked")
         self.armed.append(record.graph)
         self.armed_paths.append(Path(artifact))
 

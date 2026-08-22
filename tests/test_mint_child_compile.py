@@ -68,8 +68,8 @@ def test_the_child_binds_a_symbolic_parent_for_a_static_record(
     exact graph hash must still compile end to end (bind happens at the
     engine's plan seam and refuses any identity drift)."""
 
-    from gen_worker._vendor.torchcg.bind import strip_diagnostics
-    from gen_worker._vendor.torchcg.graph_identity import graph_hash
+    from gen_worker._vendor.torchcg.mint import strip_diagnostics
+    from gen_worker._vendor.torchcg.identity import graph_hash
 
     module = Denoiser()
     height = torch.export.Dim("height", min=2, max=16)

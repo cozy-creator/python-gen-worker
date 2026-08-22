@@ -448,7 +448,7 @@ def test_derive_runs_in_a_release_env_with_no_top_level_torchcg_or_tensorfs(
     ), document["graphs"]
 
     from gen_worker._vendor.tensorfs import LocalCAS
-    from gen_worker._vendor.torchcg.store import LocalGraphStore
+    from gen_worker.graphs.store import LocalGraphStore
 
     assert cas.is_dir() and any(cas.rglob("*")), "the graph CAS holds no blob"
     store = LocalGraphStore(LocalCAS(cas))

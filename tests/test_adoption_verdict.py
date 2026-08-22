@@ -10,9 +10,9 @@ import torch
 
 import tcg_artifacts
 from gen_worker._vendor.tensorfs import LocalCAS
-from gen_worker._vendor.torchcg.graph_identity import EnvIdentity
-from gen_worker._vendor.torchcg.requirements import RequirementsManifest
-from gen_worker._vendor.torchcg.store import LocalGraphStore
+from gen_worker.graphs.env import ArtifactEnv as EnvIdentity
+from gen_worker.graphs.requirements import RequirementsManifest
+from gen_worker.graphs.store import LocalGraphStore
 from gen_worker.cli import daemon as daemon_mod
 from gen_worker.serving import DeployBinding, EndpointHost, load_endpoint
 
@@ -230,7 +230,7 @@ def test_the_armed_zero_verdict_is_a_durable_row_not_a_log_line(
     tmp_path: Path, wire: "list[tuple]", caplog: pytest.LogCaptureFixture
 ) -> None:
     import tcg_artifacts
-    from gen_worker._vendor.torchcg.requirements import RequirementsManifest
+    from gen_worker.graphs.requirements import RequirementsManifest
     from test_serving_adopt_first import fresh_host, publish_document
 
     binding = make_binding(tmp_path)

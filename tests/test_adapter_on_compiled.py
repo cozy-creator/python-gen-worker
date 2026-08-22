@@ -11,10 +11,10 @@ import torch
 
 import tcg_artifacts
 from gen_worker import activity as activity_mod
-from gen_worker._vendor.torchcg.adopt import AdoptSession
-from gen_worker._vendor.torchcg.discovery import discover_lane
-from gen_worker._vendor.torchcg.document import GraphSetDocument
-from gen_worker._vendor.torchcg.graph_identity import EnvIdentity
+from gen_worker.graphs.adopt import AdoptSession
+from gen_worker.graphs.discovery import discover_lane
+from gen_worker.graphs.document import GraphSetDocument
+from gen_worker.graphs.env import ArtifactEnv as EnvIdentity
 from gen_worker.serving import adapter_guard
 from gen_worker.serving.mint_store import graph_store
 
@@ -51,7 +51,7 @@ def _document(module: Toy) -> GraphSetDocument:
 
 
 def _store_with_artifact(tmp_path: Path, document: GraphSetDocument) -> Any:
-    from gen_worker._vendor.torchcg.requirements import RequirementsManifest
+    from gen_worker.graphs.requirements import RequirementsManifest
 
     store = graph_store(tmp_path / "cas", None, tmp_path / "no-baked")
     manifest = RequirementsManifest(

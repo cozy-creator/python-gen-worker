@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 
 from gen_worker._vendor.tensorfs import LocalCAS
-from gen_worker._vendor.torchcg.store import LocalGraphStore
+from gen_worker.graphs.store import LocalGraphStore
 from gen_worker.models.cache_paths import BAKED_PROGRAM_CAS_DIR, baked_program_cas_dir
 from gen_worker.serving.mint_store import (
     ProgramBlobUnreachable,

@@ -143,7 +143,7 @@ def test_the_selection_contract_is_torch_free_and_registered() -> None:
 def test_the_recipe_vocabulary_runs_against_the_VENDORED_identity_and_ingress() -> None:
     """`recipe.py`'s only siblings are `identity` and `ingress`, and it folds a real key through them."""
     from gen_worker._vendor.torchcg.identity import is_compiled_graph_key
-    from gen_worker._vendor.torchcg.ingress import CallIngress, CallInput
+    from gen_worker._vendor.torchcg.identity import CallIngress, CallInput
     from gen_worker._vendor.torchcg.recipe import (
         GraphSpecializationHash,
         GraphSpecializationVariant,

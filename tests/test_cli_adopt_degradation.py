@@ -11,7 +11,7 @@ from gen_worker.cli.daemon import BootSpec, _adoption_source
 
 def _store_with_unreadable_document(root: Path, module: str) -> None:
     from gen_worker._vendor.tensorfs import LocalCAS
-    from gen_worker._vendor.torchcg.store import _document_ref
+    from gen_worker.graphs.store import _document_ref
 
     root.mkdir(parents=True, exist_ok=True)
     cas = LocalCAS(root)
@@ -87,8 +87,8 @@ def test_the_shape_actually_found_on_disk_is_the_version_mismatch(
     import logging
 
     from gen_worker._vendor.tensorfs import LocalCAS
-    from gen_worker._vendor.torchcg.document import DOCUMENT_FORMAT
-    from gen_worker._vendor.torchcg.store import _document_ref
+    from gen_worker.graphs.document import DOCUMENT_FORMAT
+    from gen_worker.graphs.store import _document_ref
 
     AHEAD = 5
     assert AHEAD == DOCUMENT_FORMAT + 1, (
@@ -120,8 +120,8 @@ def test_a_store_that_still_raises_keeps_the_typed_refusal(
     tmp_path, capsys, monkeypatch
 ):
     """The `StoreError` branch is NOT dead -- it guards the other backends."""
-    import gen_worker._vendor.torchcg.store as store_module
-    from gen_worker._vendor.torchcg.store import StoreError
+    import gen_worker.graphs.store as store_module
+    from gen_worker.graphs.store import StoreError
 
     class RaisingStore:
         def get_graphs(self, name: str) -> None:

@@ -11,7 +11,7 @@ import pytest
 import torch
 
 import tcg_artifacts
-from gen_worker._vendor.torchcg.serve import materialize
+from gen_worker._vendor.torchcg.store import open_artifact
 from gen_worker.serving import DeployBinding
 from gen_worker.serving.mint_store import graph_store
 
@@ -54,7 +54,7 @@ def opening_loader(calls: List[str]) -> "Callable[[Path, Any, Any], Callable[...
     def load(path: Path, record: Any, module: Any) -> "Callable[..., Any]":
         assert isinstance(module, torch.nn.Module), (
             "the loader binds constants from the LIVE module (tcg#58)")
-        materialize(Path(path), Path(path).parent / f"{Path(path).name}.opened")
+        open_artifact(Path(path), Path(path).parent / f"{Path(path).name}.opened")
 
         def compiled(sample: torch.Tensor) -> torch.Tensor:
             calls.append(record.graph)

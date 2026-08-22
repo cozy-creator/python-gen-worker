@@ -15,9 +15,9 @@ import pytest
 import tcg_artifacts
 from gen_worker._vendor.tensorfs import LocalCAS
 from gen_worker._vendor.torchcg import CallIngress, CallInput
-from gen_worker._vendor.torchcg.document import GraphRecord, GraphSetDocument, LaneGraphs
-from gen_worker._vendor.torchcg.graph_identity import EnvIdentity
-from gen_worker._vendor.torchcg.store import LocalGraphStore, PublishOutcome
+from gen_worker.graphs.document import GraphRecord, GraphSetDocument, LaneGraphs
+from gen_worker.graphs.env import ArtifactEnv as EnvIdentity
+from gen_worker.graphs.store import LocalGraphStore, PublishOutcome
 from gen_worker.cli import workspace
 from gen_worker.cli import compile as compile_cli
 from gen_worker.cli import endpoint_lock as el
@@ -840,7 +840,7 @@ def test_the_verb_writes_a_durable_per_specialization_verdict(
 
 
 def _adopt_session(cas: Path, artifacts: Path, armed: List[str]) -> Any:
-    from gen_worker._vendor.torchcg.adopt import AdoptSession
+    from gen_worker.graphs.adopt import AdoptSession
 
     def loader(artifact: Path, record: Any, module: Any) -> Any:
         armed.append(record.graph)

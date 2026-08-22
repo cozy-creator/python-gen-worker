@@ -6,9 +6,6 @@ from gen_worker import graph_facts
 
 import tcg_artifacts
 
-SPECIALIZATION_HASH = str(tcg_artifacts.metadata()["graph_specialization"]["specialization_hash"])
-
-
 def exported_compiled_graph_meta(
     *,
     sm: str = "sm_89",

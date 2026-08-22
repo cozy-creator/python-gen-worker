@@ -13,15 +13,15 @@ import torch
 from gen_worker import activity as activity_mod
 from gen_worker import compile_posture
 from gen_worker._vendor.tensorfs import LocalCAS
-from gen_worker._vendor.torchcg.discovery import discover_lane
-from gen_worker._vendor.torchcg.document import (
+from gen_worker.graphs.discovery import discover_lane
+from gen_worker.graphs.document import (
     GraphRecord,
     GraphSetDocument,
     LaneGraphs,
 )
-from gen_worker._vendor.torchcg.graph_identity import EnvIdentity
-from gen_worker._vendor.torchcg.requirements import RequirementsManifest
-from gen_worker._vendor.torchcg.store import LocalGraphStore
+from gen_worker.graphs.env import ArtifactEnv as EnvIdentity
+from gen_worker.graphs.requirements import RequirementsManifest
+from gen_worker.graphs.store import LocalGraphStore
 from gen_worker.serving import DeployBinding, EndpointHost, load_endpoint
 from gen_worker.serving import mint as mint_mod
 from gen_worker.serving import self_mint as self_mint_mod

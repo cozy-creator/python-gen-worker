@@ -8,7 +8,7 @@ from typing import Any, List, cast
 
 import pytest
 
-from gen_worker._vendor.torchcg.graph_identity import EnvIdentity
+from gen_worker.graphs.env import ArtifactEnv as EnvIdentity
 from gen_worker.serving import mint
 
 ENV = EnvIdentity(stack=(("torch", "2.13.0"),), sm="sm_89")
@@ -45,7 +45,7 @@ def test_the_REAL_store_refuses_the_directory_the_compiler_returns(
 ) -> None:
     """RED ARM."""
     from gen_worker._vendor.tensorfs import LocalCAS
-    from gen_worker._vendor.torchcg.store import LocalGraphStore, StoreError
+    from gen_worker.graphs.store import LocalGraphStore, StoreError
 
     store = LocalGraphStore(LocalCAS(tmp_path / "cas"))
     directory = _unpacked_artifact(tmp_path / "artifact")
@@ -114,7 +114,7 @@ def test_a_directory_carrying_no_package_refuses_BY_NAME(tmp_path: Path) -> None
 def _run_one_mint(tmp_path: Path, compiler: Any = None) -> Any:
     from gen_worker import compile_posture
     from gen_worker._vendor.tensorfs import LocalCAS
-    from gen_worker._vendor.torchcg.store import LocalGraphStore
+    from gen_worker.graphs.store import LocalGraphStore
 
     store = LocalGraphStore(LocalCAS(tmp_path / "cas"))
     armed: List[str] = []
@@ -166,7 +166,7 @@ def test_mint_one_compiles_publishes_and_manifests_through_the_REAL_store(
 def test_what_the_mint_PUBLISHED_is_opened_by_the_REAL_boot_loader(
     tmp_path: Path,
 ) -> None:
-    from gen_worker._vendor.torchcg.serve import materialize
+    from gen_worker._vendor.torchcg.store import open_artifact
 
     run = _run_one_mint(tmp_path)
     assert run.store.artifact_skew(GRAPH, ENV) is None, (
@@ -178,7 +178,7 @@ def test_what_the_mint_PUBLISHED_is_opened_by_the_REAL_boot_loader(
         assert handle.read(2) == b"\x1f\x8b", (
             f"{fetched} is not the tar+gzip envelope the boot loader reads")
 
-    graph = materialize(fetched, tmp_path / "unpacked")
+    graph = open_artifact(fetched, tmp_path / "unpacked")
     assert graph.key, "the materialized artifact states no compiled_graph_key"
     assert graph.package.is_file(), "no model.pt2 inside the envelope"
     assert graph.metadata.get("compiled_graph_key") == graph.key
