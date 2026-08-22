@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Any, cast
 
 from .identity import (
+    ARTIFACT_KIND,
     CallIngress,
     _host_isa,
     constant_names,
@@ -822,7 +823,7 @@ def metadata(spec: GraphSpec, *, key: str, sm: str, env: Mapping[str, str],
              device_type: str,
              wishlist: Sequence[LayoutWish] = ()) -> dict[str, Any]:
     return {
-        "kind": "aot-inductor",
+        "kind": ARTIFACT_KIND,
         "key": key,
         "graph": spec.graph,
         "name": spec.graph,

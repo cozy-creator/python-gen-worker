@@ -35,7 +35,7 @@ from typing import Any
 
 from ..tensorfs import CASRef, DigestMismatch, LocalCAS, RefConflict
 
-from .identity import is_artifact_key
+from .identity import ARTIFACT_KIND, is_artifact_key
 from .refuse import KeyAlreadyMinted, StoreError
 
 _REF_PREFIX = "torchcg/v1/graphs"
@@ -280,7 +280,7 @@ def read_metadata(directory: Path) -> dict[str, Any]:
         raise StoreError(f"artifact metadata is unreadable: {exc}") from exc
     if not isinstance(stamped, dict):
         raise StoreError("artifact metadata is not an object")
-    if stamped.get("kind") != "aot-inductor":
+    if stamped.get("kind") != ARTIFACT_KIND:
         raise StoreError(f"artifact states kind {stamped.get('kind')!r}")
     policy = stamped.get("compile_policy")
     if not isinstance(policy, dict) or not policy:

@@ -62,6 +62,13 @@ MAX_KEY_LENGTH = len(KEY_SCHEME) + 1 + _DIGEST_HEX + 30
 #: re-declare it and a duplicate that drifts computes wrong keys silently.
 AXES: tuple[str, ...] = ("env", "graph", "layout", "policy", "sm")
 
+#: The artifact `kind` this package writes and refuses on read. ONE producer:
+#: the mint stamps it and the store checks it, and a consumer that needs to
+#: name it imports this rather than re-spelling the string. Defined here
+#: because this module is the dependency root, so `mint` and `store` share one
+#: definition instead of agreeing by coincidence.
+ARTIFACT_KIND = "aot-inductor"
+
 
 def is_graph_hash(value: object) -> bool:
     return isinstance(value, str) and _GRAPH_RE.fullmatch(value) is not None
@@ -1414,6 +1421,7 @@ def artifact_key(
 
 
 __all__ = [
+    "ARTIFACT_KIND",
     "AXES",
     "ArtifactKey",
     "CORPUS_ENV",

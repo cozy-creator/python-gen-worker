@@ -18,6 +18,7 @@ from __future__ import annotations
 from . import adopt, identity, mint, refuse, store  # noqa: F401
 from .adopt import Dispatcher, Recast, Record, fit
 from .identity import (
+    ARTIFACT_KIND,
     GRAPH_SCHEME,
     KEY_SCHEME,
     ArtifactKey,
@@ -67,6 +68,7 @@ __all__ = [
     "Dispatcher",
     "KeyAlreadyMinted",
     "DroppedOptimization",
+    "ARTIFACT_KIND",
     "GRAPH_SCHEME",
     "GraphSpec",
     "IdentityError",
