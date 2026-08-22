@@ -8,14 +8,19 @@ what the parent emitted, not about what the child said.
 
 from __future__ import annotations
 
-import time
-
 from gen_worker.pb import worker_scheduler_pb2 as pb
 from gen_worker.procsplit import merge
 from gen_worker.procsplit.lifecycle_relay import LifecycleRelay
 
 SESSION = "sess-pgw1660"
 RELEASE = "rel-pgw1660"
+
+#: A FIXED clock. These arms compare projections for CHANGE, and two snapshots
+#: built a millisecond apart differ in their intents' `since`/`updated` stamps
+#: without differing in anything the comparison is about. Reading the wall clock
+#: per snapshot made `test_an_unchanged_projection_is_not_resent` fail about 1
+#: run in 5 — a red that says nothing about the relay.
+AT = 1_700_000_000_000
 
 
 def _snapshot(
@@ -25,8 +30,8 @@ def _snapshot(
     capability_state: "pb.FunctionCapabilityState" = pb.FUNCTION_CAPABILITY_STATE_APPLYING,
     session: str = "child-session",
     intent_id: str = "intent-a",
+    at: int = AT,
 ) -> pb.LifecycleSnapshot:
-    at = int(time.time() * 1000)
     return pb.LifecycleSnapshot(
         worker_session_id=session,
         state_seq=state_seq,
