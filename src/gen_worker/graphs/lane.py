@@ -45,7 +45,7 @@ back as ``ctx.lane.dtype``.
 from __future__ import annotations
 
 import re
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
@@ -262,9 +262,44 @@ def resolve_target(roots: Mapping[str, object], path: str) -> object:
     return value
 
 
+class PassOrderError(LaneError):
+    """A lane's DECLARED passes and the passes that actually ran disagree."""
+
+
+def require_declared_passes(
+    contract: str, declared: Sequence[str] = (), ran: Sequence[str] = ()
+) -> tuple[str, ...]:
+    """Reconcile a lane's DECLARED passes with the set that actually ran.
+
+    Both directions are refusals: a lane that declares passes and ran none never
+    ran them, and a session that ran a pass the lane does not declare produced a
+    graph nobody can address. A pass name is a derivation input of the graph
+    hash (``torchcg.graph_hash(..., passes=)``), so the two sets must be equal
+    or the artifact is addressed under an identity nothing can reproduce.
+
+    tcg#90 note: this is all that survives of torchcg's `transform.py`. The pass
+    MACHINERY (sealing, root-relation checks, `TransformSet`) had no producer in
+    this repo -- pgw has never run a transform pass -- and the seal it stamped
+    had no reader once that module died. The reconciliation is kept because it
+    still fires on the one case that reaches it: a lane declaring passes when
+    nothing ran.
+    """
+
+    want, got = tuple(declared), tuple(ran)
+    if set(want) != set(got):
+        raise PassOrderError(
+            f"lane {contract!r} declares passes {sorted(want) or ['<none>']} but "
+            f"{sorted(got) or ['<none>']} ran; a pass is a derivation input of "
+            f"the graph hash, so the two sets must be equal"
+        )
+    return want
+
+
 __all__ = [
     "LANE_JOIN",
     "LaneError",
+    "PassOrderError",
+    "require_declared_passes",
     "LaneRef",
     "parse_lane_id",
     "require_lane_id",

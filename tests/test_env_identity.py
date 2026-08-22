@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from gen_worker._vendor.torchcg.graph_identity import EnvIdentity
+from gen_worker.graphs.env import ArtifactEnv as EnvIdentity
 from gen_worker.env_identity import (
     EnvIdentityError,
     compile_stack_from_lockfile,

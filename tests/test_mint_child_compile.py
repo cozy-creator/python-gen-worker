@@ -31,7 +31,9 @@ def _request(tmp_path: Path) -> dict[str, Any]:
     torch.export.save(program, blob)
     return {
         "blob": str(blob),
-        "graph": "denoiser/h=8",
+        # tcg#90: the graph field IS the graph hash now — it is a key axis,
+        # not a free-form specialization name, so a name no longer parses.
+        "graph": "cg-graph-v1-" + "e" * 56,
         "target": "projection",
         "ingress": ingress.as_dict(),
         "target_arch": "cpu",
@@ -68,8 +70,8 @@ def test_the_child_binds_a_symbolic_parent_for_a_static_record(
     exact graph hash must still compile end to end (bind happens at the
     engine's plan seam and refuses any identity drift)."""
 
-    from gen_worker._vendor.torchcg.bind import strip_diagnostics
-    from gen_worker._vendor.torchcg.graph_identity import graph_hash
+    from gen_worker._vendor.torchcg.mint import strip_diagnostics
+    from gen_worker._vendor.torchcg.identity import graph_hash
 
     module = Denoiser()
     height = torch.export.Dim("height", min=2, max=16)
@@ -118,22 +120,31 @@ def test_the_child_request_carries_no_graph_interface_to_get_wrong(
     assert compile_one(round_tripped).is_dir()
 
 
-def test_the_child_refuses_a_retired_v3_interface_by_name(tmp_path: Path) -> None:
-    """Old bytes name themselves rather than being coerced into a v4 key."""
+def test_the_retired_v3_INTERFACE_can_no_longer_be_expressed(tmp_path: Path) -> None:
+    """This used to assert that a v3 graph-interface object refuses BY NAME
+    rather than being coerced into a v4 key.
 
-    from gen_worker._vendor.torchcg import CallIngress, GraphSpecializationDeclaration
-    from gen_worker._vendor.torchcg.declaration import RetiredGraphInterface
+    tcg#90 deleted the graph-interface object itself — there is no
+    `{v, constant_fqns, ingress}` document any more, and no `declaration.py` to
+    hold its version. The ingress travels directly into the graph hash, so
+    there is no versioned wrapper for old bytes to be shaped like and nothing
+    to coerce. The refusal is not weaker; the thing it refused cannot be built.
+
+    What replaces it is the ONE decode that still guards this seam: a request's
+    ingress must decode to the exact closed field set, or the child never mints.
+    """
+
+    from gen_worker._vendor.torchcg import CallIngress
+    from gen_worker._vendor.torchcg.refuse import IngressError
 
     request = _request(tmp_path)
-    ingress = CallIngress.decode(request["ingress"])
-    retired = {
-        "v": 3,
-        "constant_fqns": [],
-        "lifted_inputs": [],
-        "pytree": {"in": "leaf", "out": "leaf", "ingress": request["ingress"]},
-        "specialization": {},
-    }
-    with pytest.raises(RetiredGraphInterface, match="RETIRED v3 shape"):
-        GraphSpecializationDeclaration(
-            "denoiser/h=8", "projection", retired, "0" * 16, ingress.digest()
-        )
+    assert CallIngress.decode(request["ingress"])
+
+    retired = dict(request["ingress"])
+    retired["pytree"] = {"in": "leaf", "out": "leaf"}
+    with pytest.raises(IngressError, match="wrong field set"):
+        CallIngress.decode(retired)
+
+    absent = {k: v for k, v in request["ingress"].items() if k != "symbols"}
+    with pytest.raises(IngressError, match="wrong field set"):
+        CallIngress.decode(absent)

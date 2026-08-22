@@ -107,10 +107,10 @@ def test_static_buckets_bank_symbolic_parents(
     config_only_tree: Path, tmp_path_factory: pytest.TempPathFactory
 ) -> None:
     from gen_worker._vendor.tensorfs import LocalCAS
-    from gen_worker._vendor.torchcg.bind import respecialize
-    from gen_worker._vendor.torchcg.graph_identity import graph_hash
-    from gen_worker._vendor.torchcg.ingress import CallIngress
-    from gen_worker._vendor.torchcg.store import LocalGraphStore
+    from gen_worker._vendor.torchcg.mint import respecialize
+    from gen_worker._vendor.torchcg.identity import graph_hash
+    from gen_worker._vendor.torchcg.identity import CallIngress
+    from gen_worker.graphs.store import LocalGraphStore
     from gen_worker.serving import weightless_program
 
     result, cas = _derive(

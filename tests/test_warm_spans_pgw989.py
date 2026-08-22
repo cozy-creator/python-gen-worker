@@ -5,7 +5,7 @@ import types
 from typing import Dict, List
 
 import pytest
-from gen_worker._vendor.torchcg import spans
+from gen_worker.graphs import spans
 
 from gen_worker import warm_spans
 

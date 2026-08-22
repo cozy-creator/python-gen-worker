@@ -5,20 +5,11 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from gen_worker._vendor.torchcg import (
-    CallIngress,
-    CallInput,
-    DeclarationError,
-    GraphSpecializationDeclaration,
-)
+from gen_worker._vendor.torchcg import CallIngress, CallInput
 
 
-def _declaration(
-    *,
-    range_digest: str | None = None,
-    graph_witness: str = "a" * 16,
-) -> GraphSpecializationDeclaration:
-    ingress = CallIngress(
+def _ingress() -> CallIngress:
+    return CallIngress(
         parameters=("sample",),
         flat_arity=1,
         inputs=(CallInput(
@@ -27,43 +18,44 @@ def _declaration(
         ),),
         symbols=(("s0", (16, 160)),),
     )
-    return GraphSpecializationDeclaration(
-        name="unet/h=64",
-        target="unet",
-        graph={
-            "v": 4,
-            "constant_fqns": ["w.weight"],
-            "ingress": ingress.as_dict(),
-        },
-        graph_witness=graph_witness,
-        range_digest=ingress.digest() if range_digest is None else range_digest,
-        specialization_dims=(("h", 64),),
-    )
 
 
-def test_tcg_declaration_is_the_closed_identity_control() -> None:
-    declaration = _declaration()
+def test_the_call_ingress_is_the_closed_identity_control() -> None:
+    """tcg#90: the four refusals that used to live here belonged to
+    `GraphSpecializationDeclaration` — a parallel metadata layer that restated
+    the ingress alongside it and checked the two agreed (`range_digest` must
+    restate `graph.ingress`, `graph_witness` must be 16 hex).
 
-    assert declaration.range_digest == CallIngress.from_graph(
-        declaration.graph
-    ).digest()
-    assert len(declaration.specialization_hash) == 16
-    assert "family" not in declaration.facts()
+    That layer is deleted. The ingress is now carried DIRECTLY into the graph
+    hash, so there is no second copy to disagree with — the class of defect
+    those tests guarded cannot be expressed. What survives is the property they
+    were really protecting: an ingress that does not restate itself is refused
+    at construction, before anything can be addressed by it.
+    """
 
+    from gen_worker._vendor.torchcg.refuse import IngressError
 
-def test_tcg_refuses_an_absent_range_digest() -> None:
-    with pytest.raises(DeclarationError, match="range_digest"):
-        _declaration(range_digest="")
+    assert _ingress().digest()
 
-
-def test_tcg_refuses_a_range_digest_that_does_not_restate_ingress() -> None:
-    with pytest.raises(DeclarationError, match="does not restate"):
-        _declaration(range_digest="0" * 32)
-
-
-def test_tcg_refuses_an_absent_graph_witness() -> None:
-    with pytest.raises(DeclarationError, match="graph_witness"):
-        _declaration(graph_witness="")
+    # A row whose `name` does not restate its own param/path.
+    with pytest.raises(IngressError, match="does not restate"):
+        CallIngress(
+            parameters=("sample",),
+            flat_arity=1,
+            inputs=(CallInput(
+                "wrong", 0, "sample", 0, (), "sample", "bfloat16", (1,),
+            ),),
+        )
+    # A symbol referenced by a shape but given no bounds — the range half of
+    # what `range_digest` used to be asked about.
+    with pytest.raises(IngressError, match="no declared bounds"):
+        CallIngress(
+            parameters=("sample",),
+            flat_arity=1,
+            inputs=(CallInput(
+                "sample", 0, "sample", 0, (), "sample", "bfloat16", (1, "s0"),
+            ),),
+        )
 
 
 def test_an_unhashed_download_is_distinguishable_from_a_verified_one(

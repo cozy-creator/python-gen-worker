@@ -88,7 +88,7 @@ def test_the_pipeline_the_author_marked_carries_every_declared_component(
         sys.path.remove(str(FIXTURES))
 
     import torch
-    from gen_worker._vendor.torchcg.hollow import hollow_session
+    from gen_worker.graphs.hollow import hollow_session
 
     with hollow_session("cuda"):
         pipeline = modular_tree.TinyStreamingPipeline.from_pretrained(

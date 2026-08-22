@@ -103,17 +103,20 @@ class _RecordingPackage:
         self.loads.append(dict(values))
 
 
-class _BoundRunner:
+class _BoundPackage(_RecordingPackage):
+    """What `torchcg.adopt.load` hands back: torch's own compiled package,
+    carrying the table torchcg stamped so `rebind` can re-resolve it.
+
+    tcg#90 removed the `runner._package` / `._bound_values` indirection this
+    stub used to model — the entry IS the package now.
+    """
 
     def __init__(self, module: Any) -> None:
-        self._package = _RecordingPackage()
-        self._bound_values = {
-            name: tensor for name, tensor in module.named_parameters()}
-
-
-class _Entry:
-    def __init__(self, module: Any) -> None:
-        self.runner = _BoundRunner(module)
+        super().__init__()
+        bound = {name: tensor for name, tensor in module.named_parameters()}
+        self._torchcg_retained = dict(bound)
+        self._torchcg_state_fqns = tuple(sorted(bound))
+        self._torchcg_literals: Dict[str, Any] = {}
 
 
 class _PointerArtifact(_FrozenArtifact):
@@ -122,7 +125,7 @@ class _PointerArtifact(_FrozenArtifact):
         self._frozen = module
         self.calls = 0
         self.last_selected = "probe-graph"
-        self.entry = _Entry(module)
+        self.entry = _BoundPackage(module)
         self.runners = (("probe-graph", self.entry),)
 
     def __call__(self, *args: Any, **kwargs: Any) -> Any:
@@ -213,7 +216,7 @@ def test_the_fold_reaches_a_pointer_bound_artifact() -> None:
         "the folded adapter must change the served tensor")
     assert artifact.calls == 2, "both calls went through the artifact"
     assert torch.equal(_run(unet, args), baseline), "restore must be exact"
-    assert len(artifact.entry.runner._package.loads) == 2, (
+    assert len(artifact.entry.loads) == 2, (
         "the artifact must be told its constants moved on the way IN and on "
         "the way OUT — AOTI folds once and never re-folds on a bare write")
 
@@ -429,20 +432,45 @@ def test_an_empty_adapter_set_is_a_no_op_that_still_yields() -> None:
         assert torch.equal(_run(unet, args), baseline)
 
 
-def test_rearm_constants_still_matches_the_real_runner_surface() -> None:
+def test_rearm_constants_uses_torchcgs_PUBLIC_rebind() -> None:
+    """This fence asked for a public `rebind()` and got one (tcg#90).
+
+    It used to assert that `CompiledGraphRunner._package` and `._bound_values`
+    still existed, because `rearm_constants` reached through them. That runner
+    is gone — `adopt.load` hands back torch's own `AOTICompiledModel` — and the
+    fence caught it: without the change below, every compiled LoRA fold would
+    have raised `ConstantRearmUnsupported` in production.
+
+    So the fence now guards the SUPPORTED surface instead of a private one,
+    which is the whole point of having asked for it.
+    """
     import inspect
 
-    from gen_worker._vendor.torchcg.runner import CompiledGraphRunner
+    from gen_worker._vendor.torchcg.adopt import rebind
+    from gen_worker.serving import adapter_guard
 
-    source = inspect.getsource(CompiledGraphRunner)
-    for attribute in ("self._package", "self._bound_values"):
-        assert attribute in source, (
-            f"{attribute} is gone from CompiledGraphRunner — "
-            "adapter_guard.rearm_constants reads it to re-install the "
-            "constant "
-            "table after a fold, and would now refuse every compiled fold. "
-            "Give torchcg a public rebind() and call that instead"
+    import ast
+
+    assert callable(rebind)
+    tree = ast.parse(inspect.getsource(adapter_guard.rearm_constants).lstrip())
+    # The CODE, not the comments: the comment above the call explains the
+    # private pair this replaced, and a substring check on the raw source trips
+    # on its own explanation.
+    code = ast.unparse(tree)
+    assert "rebind(call, module)" in code, (
+        "rearm_constants stopped calling torchcg's public rebind()"
+    )
+    for private in ("_package", "_bound_values"):
+        assert private not in code, (
+            f"rearm_constants reaches through {private!r} again — a private "
+            f"surface is what put this fence here"
         )
+
+    # And rebind must RE-RESOLVE from the module, not re-install what it held:
+    # a fold replaces a tensor, so the retained pointers are stale.
+    assert "resident_constants(module)" in ast.unparse(
+        ast.parse(inspect.getsource(rebind).lstrip())
+    )
 
 
 def test_the_set_digest_keys_on_refs_and_weights() -> None:

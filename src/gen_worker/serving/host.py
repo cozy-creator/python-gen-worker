@@ -117,8 +117,8 @@ class EndpointHost:
         stack: Optional[CompileStack] = None,
     ) -> None:
         """Instantiate each referenced Model class and run its ``load(ctx)``."""
-        from .._vendor.torchcg import EnvironmentMismatch
-        from .._vendor.torchcg.adopt import AdoptSession
+        from ..graphs.requirements import EnvironmentMismatch
+        from ..graphs.adopt import AdoptSession
         from . import adapter_guard
         from ..env_identity import installed_stack_drift
 

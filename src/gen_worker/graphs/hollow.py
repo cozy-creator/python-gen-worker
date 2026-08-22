@@ -74,6 +74,7 @@ from __future__ import annotations
 import contextlib
 from collections.abc import Iterator, Mapping
 from dataclasses import dataclass
+from types import ModuleType
 from typing import Any
 
 
@@ -739,6 +740,21 @@ def _hollow_transformers(session: HollowSession) -> Any:
     return classmethod(from_pretrained)
 
 
+def _optional_module(name: str) -> ModuleType | None:
+    """Import one loader module, or None when the library is not installed.
+
+    Three copies of the same try/except said this three times; a library's
+    absence is a value, not a control-flow shape.
+    """
+
+    from importlib import import_module
+
+    try:
+        return import_module(name)
+    except ImportError:
+        return None
+
+
 @contextlib.contextmanager
 def _loader_interception(session: HollowSession) -> Iterator[None]:
     """Patch the model-bearing loaders of whichever libraries are present.
@@ -755,18 +771,9 @@ def _loader_interception(session: HollowSession) -> Iterator[None]:
     """
 
     patched: list[tuple[Any, Any]] = []
-    try:
-        import diffusers.models.modeling_utils as _dmu
-    except ImportError:
-        _dmu = None
-    try:
-        import transformers.modeling_utils as _tmu
-    except ImportError:
-        _tmu = None
-    try:
-        import diffusers.modular_pipelines.modular_pipeline as _dmp
-    except ImportError:
-        _dmp = None
+    _dmu = _optional_module("diffusers.models.modeling_utils")
+    _tmu = _optional_module("transformers.modeling_utils")
+    _dmp = _optional_module("diffusers.modular_pipelines.modular_pipeline")
     if _dmu is None and _tmu is None:
         raise HollowError(
             "hollow instantiation intercepts diffusers and/or transformers "
@@ -822,13 +829,19 @@ def _hollow_module_moves(device: str) -> Iterator[None]:
     """
 
     import torch
-    from torch._subclasses.fake_tensor import FakeTensor
 
     original_to = torch.nn.Module.to
     original_cuda = torch.nn.Module.cuda
 
+    from ..meta_instantiation import is_virtual
+
     def is_hollow(module: Any) -> bool:
-        return any(isinstance(p, FakeTensor) for p in module.parameters())
+        # STORAGE, not TYPE (pgw#1661/#1662). A wrapper subclass over a fake
+        # tensor — torchao's `Float8Tensor` and every quantized wrapper after
+        # it — is NOT a `FakeTensor`, so an isinstance check reads a quantized
+        # hollow module as REAL and lets author `.to("cuda")` take torch's real
+        # path on parameters that allocated nothing.
+        return any(is_virtual(p) for p in module.parameters())
 
     def hollow_to(module: Any, *args: Any, **kwargs: Any) -> Any:
         if not is_hollow(module):
@@ -899,8 +912,9 @@ def observation_shims(device: str = DEFAULT_TRACE_DEVICE) -> Iterator[None]:
     """The two torch-function shims the hollow drive runs under."""
 
     import torch
-    from torch._subclasses.fake_tensor import FakeTensor
     from torch.overrides import TorchFunctionMode
+
+    from ..meta_instantiation import is_virtual
 
     class OneTraceDevice(TorchFunctionMode):
         def __torch_function__(
@@ -942,7 +956,9 @@ def observation_shims(device: str = DEFAULT_TRACE_DEVICE) -> Iterator[None]:
             if (
                 func in _HOST_EGRESS
                 and isinstance(host, torch.Tensor)
-                and not isinstance(host, FakeTensor)
+                # STORAGE, not TYPE: a wrapper over fake has no bytes to copy,
+                # and `.cpu()`-ing it is a no-op that fails a frame later.
+                and not is_virtual(host)
                 and host.device.type != "cpu"
             ):
                 # The copy MUST run with torch-function dispatch disabled.
@@ -956,7 +972,7 @@ def observation_shims(device: str = DEFAULT_TRACE_DEVICE) -> Iterator[None]:
                 with torch._C.DisableTorchFunction():
                     moved = host.detach().to("cpu")
                 return func(moved, *args[1:], **kwargs)
-            if isinstance(host, FakeTensor):
+            if isinstance(host, torch.Tensor) and is_virtual(host):
                 # `__array__` alongside `numpy`: `np.array(t)` and `t.numpy()`
                 # are the same egress through two different functions, and a
                 # fake tensor has to answer both (tcg#57).

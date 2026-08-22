@@ -8,8 +8,8 @@ from typing import Any, Dict, Tuple
 import torch
 
 from gen_worker._vendor.torchcg import CallIngress, CallInput
-from gen_worker._vendor.torchcg.adopt import AdoptSession, _forward_parameters
-from gen_worker._vendor.torchcg.document import (
+from gen_worker.graphs.adopt import AdoptSession, _forward_parameters
+from gen_worker.graphs.document import (
     GraphRecord,
     GraphSetDocument,
     LaneGraphs,
@@ -150,10 +150,16 @@ def test_carrying_a_signature_survives_a_forward_that_has_none(tmp_path: Any) ->
 
 
 def test_the_predicate_this_fence_uses_is_torchcgs_own() -> None:
-    """If torchcg changes which parameter kinds count, this fence must move with it — so the rule is imported, never restated here."""
+    """The rule is IMPORTED, never restated here — so it moves with its owner.
+
+    tcg#90 moved that owner: the claiming half of adoption is pgw's now
+    (`gen_worker.graphs.adopt`), while torchcg keeps `program -> keyed artifact`.
+    What the fence protects is unchanged — that this predicate is not a second
+    copy of the parameter-kind rule.
+    """
     module = inspect.getmodule(_forward_parameters)
     assert module is not None
-    assert module.__name__.endswith("torchcg.adopt")
+    assert module.__name__ == "gen_worker.graphs.adopt", module.__name__
 
 
 def test_the_erased_signature_reaches_a_READER_and_names_the_remedy(

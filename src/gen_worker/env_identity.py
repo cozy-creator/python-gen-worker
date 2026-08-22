@@ -6,11 +6,8 @@ from collections import deque
 from pathlib import Path
 from typing import Any, Mapping
 
-from ._vendor.torchcg.graph_identity import (
-    GraphIdentityError,
-    compile_stack,
-    is_compile_relevant,
-)
+from ._vendor.torchcg.identity import compile_stack, is_compile_relevant
+from ._vendor.torchcg.refuse import IdentityError
 
 LOCKFILE_NAME = "uv.lock"
 
@@ -103,6 +100,14 @@ def cuda_buckets(lockfile: Path | str) -> tuple[str, ...]:
     )
 
 
+def _rows(block: Mapping[str, str]) -> tuple[tuple[str, str], ...]:
+    """torchcg states a compile stack as a name->version BLOCK (it feeds the env
+    axis of one key). pgw carries it as sorted rows, because a lock row is a
+    frozen value and several callers hash or compare it positionally."""
+
+    return tuple(sorted(block.items()))
+
+
 def compile_stack_from_lockfile(
     lockfile: Path | str, *, bucket: str = ""
 ) -> tuple[tuple[str, str], ...]:
@@ -113,7 +118,7 @@ def compile_stack_from_lockfile(
     buckets = cuda_buckets(path)
     try:
         if not buckets:
-            return compile_stack(lock_entries(path, bucket=bucket))
+            return _rows(compile_stack(lock_entries(path, bucket=bucket)))
         if not bucket:
             raise EnvIdentityError(
                 f"lockfile {path} locks {len(buckets)} CUDA buckets "
@@ -124,8 +129,8 @@ def compile_stack_from_lockfile(
                 f"lockfile {path} locks {', '.join(buckets)}; this env is "
                 f"{bucket!r}, which its author never locked"
             )
-        return compile_stack(_bucket_entries(path, packages, bucket))
-    except GraphIdentityError as exc:
+        return _rows(compile_stack(_bucket_entries(path, packages, bucket)))
+    except IdentityError as exc:
         raise EnvIdentityError(f"lockfile {path}: {exc}") from exc
 
 

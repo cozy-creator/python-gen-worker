@@ -314,7 +314,7 @@ def contradicted_axes(
     dynamic-dims program is actually for (pgw#1548: SDXL 18 -> 2).
     """
 
-    from .ingress import symbol_terms
+    from .._vendor.torchcg.identity import symbol_terms
 
     return {
         (target, row.name, axis)
@@ -607,7 +607,7 @@ def alias_ingress(ingress: Any, plan: DynamicPlan) -> Any:
     can see it (``adopt`` binds one value per symbol per call).
     """
 
-    from .ingress import CallIngress, CallInput
+    from .._vendor.torchcg.identity import CallIngress, CallInput
 
     if not plan.classes:
         return ingress

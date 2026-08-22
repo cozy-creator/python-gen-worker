@@ -46,20 +46,22 @@ import tempfile
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Optional, Protocol
 
-from .._vendor.torchcg.document import (
+from ..graphs.store import PublishOutcome
+from ..graphs.document import (
     DOCUMENT_FORMAT,
     DocumentError,
     GraphSetDocument,
 )
-from .._vendor.torchcg.graph_identity import EnvIdentity
-from .._vendor.torchcg.requirements import RequirementsError, RequirementsManifest
-from .._vendor.torchcg.store import PublishOutcome, StoreError
+from ..graphs.env import ArtifactEnv, require_env
+from ..graphs.requirements import RequirementsError, RequirementsManifest
+from .._vendor.torchcg.store import StoreError
 
 HTTP_TIMEOUT_S = 60.0
 
 ADOPT_PATH = "/v1/worker/releases/{release_id}/compiled-graphs"
 
 HIT = "hit"
+
 
 
 class ReleaseNotStamped(Exception):
@@ -181,13 +183,13 @@ class HubGraphStore:
             if str(row.get("status") or "") == "miss"
         )
 
-    def _env(self) -> EnvIdentity:
+    def _env(self) -> ArtifactEnv:
         document = self.get_graphs(self._release_id)
         if document is None:
             raise StoreError(f"release {self._release_id} stamped no graph document")
-        return document.env(self._sm)
+        return require_env(document.stack, self._sm)
 
-    def _entry(self, graph: str, env: EnvIdentity) -> Optional[Mapping[str, Any]]:
+    def _entry(self, graph: str, env: ArtifactEnv) -> Optional[Mapping[str, Any]]:
         if env != self._env():
             return None
         row = self._row(graph)
@@ -267,11 +269,11 @@ class HubGraphStore:
             "(th#2134); a worker never writes it"
         )
 
-    def has_artifact(self, graph: str, env: EnvIdentity) -> bool:
+    def has_artifact(self, graph: str, env: ArtifactEnv) -> bool:
         return self._entry(graph, env) is not None
 
     def fetch_artifact(
-        self, graph: str, env: EnvIdentity, destination: str | Path
+        self, graph: str, env: ArtifactEnv, destination: str | Path
     ) -> Optional[Path]:
         entry = self._entry(graph, env)
         if entry is None:
@@ -306,7 +308,7 @@ class HubGraphStore:
     def _fetch_from_transport(
         self,
         graph: str,
-        env: EnvIdentity,
+        env: ArtifactEnv,
         entry: Mapping[str, Any],
         artifact_path: str,
     ) -> bytes:
@@ -344,7 +346,7 @@ class HubGraphStore:
     def publish_artifact(
         self,
         graph: str,
-        env: EnvIdentity,
+        env: ArtifactEnv,
         artifact: str | Path,
         manifest: RequirementsManifest,
     ) -> PublishOutcome:
@@ -354,7 +356,7 @@ class HubGraphStore:
         )
 
     def get_manifest(
-        self, graph: str, env: EnvIdentity
+        self, graph: str, env: ArtifactEnv
     ) -> Optional[RequirementsManifest]:
         entry = self._entry(graph, env)
         if entry is None:

@@ -10,12 +10,12 @@ import torch
 
 from gen_worker import boot_stages
 from gen_worker._vendor.tensorfs import LocalCAS
-from gen_worker._vendor.torchcg import EnvironmentMismatch
-from gen_worker._vendor.torchcg.discovery import discover_lane
-from gen_worker._vendor.torchcg.document import GraphRecord, GraphSetDocument
-from gen_worker._vendor.torchcg.graph_identity import EnvIdentity
-from gen_worker._vendor.torchcg.requirements import RequirementsManifest
-from gen_worker._vendor.torchcg.store import LocalGraphStore, StoreError
+from gen_worker.graphs.requirements import EnvironmentMismatch
+from gen_worker.graphs.discovery import discover_lane
+from gen_worker.graphs.document import GraphRecord, GraphSetDocument
+from gen_worker.graphs.env import ArtifactEnv as EnvIdentity
+from gen_worker.graphs.requirements import RequirementsManifest
+from gen_worker.graphs.store import LocalGraphStore, StoreError
 from gen_worker.serving import (
     DeployBinding,
     DistillationAdapter,

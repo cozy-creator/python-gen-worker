@@ -6,7 +6,7 @@ import contextlib
 import time
 from typing import Any, Dict, Iterator, List, Mapping, Tuple
 
-from gen_worker._vendor.torchcg.spans import phase_delta, phase_snapshot
+from gen_worker.graphs.spans import phase_delta, phase_snapshot
 
 WARM_SPANS_V = 1
 

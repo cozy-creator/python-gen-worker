@@ -85,7 +85,7 @@ class DeriveBlock:
 
 def torchcg_format_versions() -> tuple[int, int]:
     """``(GRAPH_INTERFACE_FORMAT, DOCUMENT_FORMAT)`` — IMPORTED, never spelled."""
-    from .._vendor.torchcg import DOCUMENT_FORMAT, GRAPH_INTERFACE_FORMAT
+    from ..graphs.document import DOCUMENT_FORMAT, GRAPH_INTERFACE_FORMAT
 
     return int(GRAPH_INTERFACE_FORMAT), int(DOCUMENT_FORMAT)
 

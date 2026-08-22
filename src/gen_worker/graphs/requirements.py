@@ -22,7 +22,8 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
-from .graph_identity import EnvIdentity, GraphIdentityError, is_graph_hash
+from .._vendor.torchcg.identity import is_graph_hash
+from .env import ArtifactEnv, EnvError, require_env
 
 _MANIFEST_FIELDS = frozenset(
     ("v", "include_set", "sm_compiled", "cuda_floor", "autotuned_on")
@@ -155,7 +156,7 @@ class RequirementsManifest:
 
 
 def assert_exact_env(
-    stamped: EnvIdentity, *, stack: Mapping[str, str] | Sequence[tuple[str, str]], sm: str
+    stamped: ArtifactEnv, *, stack: Mapping[str, str] | Sequence[tuple[str, str]], sm: str
 ) -> None:
     """Boot-time audit that this pod's env == the artifact env (pgw#1367).
 
@@ -169,8 +170,8 @@ def assert_exact_env(
     """
 
     try:
-        observed = EnvIdentity(stack=stack, sm=sm)
-    except GraphIdentityError as exc:
+        observed = require_env(stack, sm)
+    except EnvError as exc:
         raise EnvironmentMismatch(f"cannot state this pod's env identity: {exc}") from exc
     if observed == stamped:
         return
@@ -197,7 +198,7 @@ class ArtifactCandidate:
     """One published artifact row a miss-path ladder may consider."""
 
     graph: str
-    env: EnvIdentity
+    env: ArtifactEnv
     digest: str
     manifest: RequirementsManifest
 

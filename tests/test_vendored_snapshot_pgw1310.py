@@ -108,19 +108,32 @@ def test_the_torchcg_snapshot_is_one_rev() -> None:
 
 
 def test_the_vendored_store_uses_the_frozen_ref_prefix() -> None:
-    """The re-key this bump paid for, asserted where the fleet can see it."""
+    """The ref namespace, asserted where the fleet can see it.
 
-    from gen_worker._vendor.torchcg import storage
+    tcg#90 moved the artifact store to `torchcg/v1/graphs` and pgw's own
+    document/program store kept `torchcg/v2`. Two stores share one CAS, so the
+    prefixes must stay distinct AND stated.
+    """
 
-    key = "cg-key-v1-" + "0" * 56
-    assert storage._REF_PREFIX == "torchcg/v1"
-    assert storage._graph_ref(key) == f"torchcg/v1/graphs/{key}"
-    assert tuple(f.name for f in dataclasses.fields(storage.StoreResult)) == (
-        "outcome", "key", "artifact")
+    from gen_worker._vendor.torchcg import store as artifact_store
+    from gen_worker.graphs import store as pgw_store
+
+    assert artifact_store._REF_PREFIX == "torchcg/v1/graphs"
+    assert pgw_store._REF_PREFIX == "torchcg/v2"
+    assert not artifact_store._REF_PREFIX.startswith(pgw_store._REF_PREFIX + "/")
+    assert tuple(f.name for f in dataclasses.fields(artifact_store.StoredArtifact)) == (
+        "key", "directory", "metadata", "ref")
 
 
-def test_the_selection_contract_is_torch_free_and_registered() -> None:
-    """The property that made the graft safe, executed rather than asserted."""
+def test_the_vendored_identity_is_TORCH_FREE() -> None:
+    """The property that made the graft safe, EXECUTED rather than asserted.
+
+    It used to be asserted of `selection`, which is deleted. It matters more
+    now, not less: `torchcg.identity` resolves the layout handle every artifact
+    declares, and `resolve`/cold-reuse run in processes that never import
+    torch. If importing identity — or reading the identity morphism — drags
+    torch in, that path stops existing and nothing else notices.
+    """
     import subprocess
     import sys
 
@@ -129,28 +142,31 @@ def test_the_selection_contract_is_torch_free_and_registered() -> None:
         [sys.executable, "-c",
          "import sys;"
          f"sys.path.insert(0, {src!r});"
-         "from gen_worker._vendor.torchcg import selection;"
-         "from gen_worker._vendor.torchcg.contracts import CONTRACT_FILES;"
-         "assert selection.SELECTION_CONTRACT_FILE in CONTRACT_FILES;"
-         "assert selection.selection_vectors();"
-         "assert 'torch' not in sys.modules;"
-         "print('ok')"],
+         "from gen_worker._vendor.torchcg import identity;"
+         "assert 'torch' not in sys.modules, 'importing identity pulled torch in';"
+         "h = identity.contiguous_handle();"
+         "assert h, 'no identity layout handle';"
+         "assert 'torch' not in sys.modules, 'resolving the identity layout pulled torch in';"
+         "print(h)"],
         capture_output=True, text=True, check=False)
     assert proof.returncode == 0, proof.stderr
-    assert proof.stdout.strip() == "ok"
+    # Read from the VENDORED corpus, so this also proves the corpus shipped.
+    assert proof.stdout.strip().startswith("torch."), proof.stdout
 
 
-def test_the_recipe_vocabulary_runs_against_the_VENDORED_identity_and_ingress() -> None:
-    """`recipe.py`'s only siblings are `identity` and `ingress`, and it folds a real key through them."""
-    from gen_worker._vendor.torchcg.identity import is_compiled_graph_key
-    from gen_worker._vendor.torchcg.ingress import CallIngress, CallInput
-    from gen_worker._vendor.torchcg.recipe import (
-        GraphSpecializationHash,
-        GraphSpecializationVariant,
-        IngressDigest,
-        LayoutContract,
-        ParameterKind,
-        call_signature,
+def test_the_vendored_identity_and_ingress_fold_a_real_key() -> None:
+    """The vendored identity is exercised, not merely imported.
+
+    `recipe.py`'s vocabulary is gone with it; what survives is the thing it was
+    folding — an ingress built here reaches a key through the vendored
+    identity, using the vendored layout corpus.
+    """
+    from gen_worker._vendor.torchcg.identity import (
+        CallIngress,
+        CallInput,
+        artifact_key,
+        contiguous_handle,
+        is_artifact_key,
     )
 
     ingress = CallIngress(
@@ -169,22 +185,25 @@ def test_the_recipe_vocabulary_runs_against_the_VENDORED_identity_and_ingress() 
             ),
         ),
     )
-    variant = GraphSpecializationVariant(
-        specialization_hash=GraphSpecializationHash("0123456789abcdef"),
-        ingress_digest=IngressDigest(ingress.digest()),
-        ingress=ingress,
-        layout=LayoutContract("bf16"),
+    assert len(ingress.digest()) == 32
+    key = artifact_key(
+        "cg-graph-v1-" + "0" * 56,
+        sm="sm_89",
+        env={"torch": "2.13.0"},
+        policy={"always_keep_tensor_constants": True},
+        layout=contiguous_handle(),
     )
-    signature = call_signature(ingress)
-    assert signature.flat_arity == 1
-    assert signature.parameters[0].kind is ParameterKind.TENSOR
-
-    class _Runtime:
-        sm = "sm_86"
-        toolchain = {"torch": "2.13.0"}
-
-    key = variant.key(_Runtime())
-    assert is_compiled_graph_key(str(key)), str(key)
+    assert is_artifact_key(key.value)
+    # A different card is a different artifact — the axis that used to be
+    # checked by folding a `_Runtime` through `recipe.variant.key`.
+    other = artifact_key(
+        "cg-graph-v1-" + "0" * 56,
+        sm="sm_86",
+        env={"torch": "2.13.0"},
+        policy={"always_keep_tensor_constants": True},
+        layout=contiguous_handle(),
+    )
+    assert other.value != key.value
 
 
 def test_the_read_plane_runs_without_the_compiled_extension() -> None:

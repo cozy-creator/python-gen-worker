@@ -11,7 +11,7 @@ from gen_worker.cli.daemon import BootSpec, _adoption_source
 
 def _store_with_unreadable_document(root: Path, module: str) -> None:
     from gen_worker._vendor.tensorfs import LocalCAS
-    from gen_worker._vendor.torchcg.store import _document_ref
+    from gen_worker.graphs.store import _document_ref
 
     root.mkdir(parents=True, exist_ok=True)
     cas = LocalCAS(root)
@@ -51,14 +51,14 @@ def test_the_discard_itself_is_announced_and_names_what_went_away(
     spec = BootSpec(endpoint_dir=tmp_path, graph_store=store, sm="sm_89")
 
     with caplog.at_level(
-        logging.WARNING, logger="gen_worker._vendor.torchcg.store"
+        logging.WARNING, logger="gen_worker.graphs.store"
     ):
         _adoption_source(spec, "toy.main")
 
     said = "\n".join(
         r.getMessage()
         for r in caplog.records
-        if r.name == "gen_worker._vendor.torchcg.store"
+        if r.name == "gen_worker.graphs.store"
     )
     assert "DISCARDED" in said
     assert "toy.main" in said
@@ -87,8 +87,8 @@ def test_the_shape_actually_found_on_disk_is_the_version_mismatch(
     import logging
 
     from gen_worker._vendor.tensorfs import LocalCAS
-    from gen_worker._vendor.torchcg.document import DOCUMENT_FORMAT
-    from gen_worker._vendor.torchcg.store import _document_ref
+    from gen_worker.graphs.document import DOCUMENT_FORMAT
+    from gen_worker.graphs.store import _document_ref
 
     AHEAD = 5
     assert AHEAD == DOCUMENT_FORMAT + 1, (
@@ -106,7 +106,7 @@ def test_the_shape_actually_found_on_disk_is_the_version_mismatch(
 
     spec = BootSpec(endpoint_dir=tmp_path, graph_store=store, sm="sm_89")
     with caplog.at_level(
-        logging.WARNING, logger="gen_worker._vendor.torchcg.store"
+        logging.WARNING, logger="gen_worker.graphs.store"
     ):
         _, document = _adoption_source(spec, "toy.main")
 
@@ -120,8 +120,8 @@ def test_a_store_that_still_raises_keeps_the_typed_refusal(
     tmp_path, capsys, monkeypatch
 ):
     """The `StoreError` branch is NOT dead -- it guards the other backends."""
-    import gen_worker._vendor.torchcg.store as store_module
-    from gen_worker._vendor.torchcg.store import StoreError
+    import gen_worker.graphs.store as store_module
+    from gen_worker.graphs.store import StoreError
 
     class RaisingStore:
         def get_graphs(self, name: str) -> None:

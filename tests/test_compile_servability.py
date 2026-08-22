@@ -15,9 +15,9 @@ import pytest
 import tcg_artifacts
 from gen_worker._vendor.tensorfs import LocalCAS
 from gen_worker._vendor.torchcg import CallIngress, CallInput
-from gen_worker._vendor.torchcg.document import GraphRecord, GraphSetDocument, LaneGraphs
-from gen_worker._vendor.torchcg.graph_identity import EnvIdentity
-from gen_worker._vendor.torchcg.store import LocalGraphStore, PublishOutcome
+from gen_worker.graphs.document import GraphRecord, GraphSetDocument, LaneGraphs
+from gen_worker.graphs.env import ArtifactEnv as EnvIdentity
+from gen_worker.graphs.store import LocalGraphStore, PublishOutcome
 from gen_worker.cli import workspace
 from gen_worker.cli import compile as compile_cli
 from gen_worker.cli import endpoint_lock as el
@@ -394,20 +394,22 @@ def test_a_mint_in_the_engine_cache_is_reused_without_a_child_or_a_program(
     endpoint: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     from gen_worker._vendor.tensorfs import LocalCAS as VendoredCAS
-    from gen_worker._vendor.torchcg.engine import Engine
+    # tcg#90: `Engine.import_artifact` is `Store.put` — the engine is gone and
+    # the store addresses by the ONE key.
+    from gen_worker._vendor.torchcg.store import Store
     from gen_worker import toolchain as compile_cache
 
     monkeypatch.setattr(workspace, "artifacts_root", lambda: tmp_path / "box")
     cas = tmp_path / "graph-cas"
     store = LocalGraphStore(LocalCAS(cas))
-    engine = Engine(VendoredCAS(cas))
+    engine = Store(VendoredCAS(cas))
     for graph in GRAPHS:
         artifact = tcg_artifacts.build(
             tmp_path / f"{graph[-8:]}.tar.gz",
             graph_specialization=graph, sm=SM,
             witness=graph[-16:],
         )
-        engine.import_artifact(tcg_artifacts.key_of(artifact), artifact)
+        engine.put(tcg_artifacts.key_of(artifact), artifact)
 
     monkeypatch.setattr(
         compile_cache, "toolchain_digest",
@@ -435,20 +437,22 @@ def test_a_cached_mint_on_a_different_toolchain_is_not_reused(
 ) -> None:
     """RED ARM: the reuse index answers only the exact (sm x toolchain) axis."""
     from gen_worker._vendor.tensorfs import LocalCAS as VendoredCAS
-    from gen_worker._vendor.torchcg.engine import Engine
+    # tcg#90: `Engine.import_artifact` is `Store.put` — the engine is gone and
+    # the store addresses by the ONE key.
+    from gen_worker._vendor.torchcg.store import Store
     from gen_worker import toolchain as compile_cache
 
     monkeypatch.setattr(workspace, "artifacts_root", lambda: tmp_path / "box")
     cas = tmp_path / "graph-cas"
     store = LocalGraphStore(LocalCAS(cas))
     _seed_programs(store, tmp_path)
-    engine = Engine(VendoredCAS(cas))
+    engine = Store(VendoredCAS(cas))
     stale = tcg_artifacts.build(
         tmp_path / "stale.tar.gz",
         graph_specialization=GRAPHS[0], sm=SM,
         toolchain={"torch": "an-older-stack", "triton": "entirely"},
     )
-    engine.import_artifact(tcg_artifacts.key_of(stale), stale)
+    engine.put(tcg_artifacts.key_of(stale), stale)
 
     monkeypatch.setattr(
         compile_cache, "toolchain_digest",
@@ -487,7 +491,7 @@ def test_published_bytes_are_the_envelope_and_materialize(
 def test_a_legacy_bare_package_position_is_named_and_then_replaced(
     endpoint: Path, tmp_path: Path
 ) -> None:
-    from gen_worker._vendor.torchcg import RequirementsManifest
+    from gen_worker.graphs.requirements import RequirementsManifest
 
     cas = tmp_path / "graph-cas"
     store = LocalGraphStore(LocalCAS(cas))
@@ -840,7 +844,7 @@ def test_the_verb_writes_a_durable_per_specialization_verdict(
 
 
 def _adopt_session(cas: Path, artifacts: Path, armed: List[str]) -> Any:
-    from gen_worker._vendor.torchcg.adopt import AdoptSession
+    from gen_worker.graphs.adopt import AdoptSession
 
     def loader(artifact: Path, record: Any, module: Any) -> Any:
         armed.append(record.graph)

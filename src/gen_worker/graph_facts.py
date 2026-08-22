@@ -7,7 +7,7 @@ import json
 from dataclasses import dataclass
 from typing import Any, Dict, Iterable, Mapping, Tuple
 
-from gen_worker._vendor.torchcg import is_compiled_graph_key
+from gen_worker._vendor.torchcg import is_artifact_key
 
 EXPORT_ENVELOPE_KEY = "declared_envelope"
 
@@ -17,7 +17,7 @@ class GraphFactsError(ValueError):
 
 
 def _refuse_key_shaped(where: str, name: str, value: str) -> None:
-    if is_compiled_graph_key(value):
+    if is_artifact_key(value):
         raise GraphFactsError(
             f"{where}: {name}={value!r} is a COMPILED-GRAPH KEY where a fact "
             f"digest belongs. A key is the OUTPUT of identity, never an input "

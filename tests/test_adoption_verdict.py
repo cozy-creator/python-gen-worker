@@ -10,9 +10,9 @@ import torch
 
 import tcg_artifacts
 from gen_worker._vendor.tensorfs import LocalCAS
-from gen_worker._vendor.torchcg.graph_identity import EnvIdentity
-from gen_worker._vendor.torchcg.requirements import RequirementsManifest
-from gen_worker._vendor.torchcg.store import LocalGraphStore
+from gen_worker.graphs.env import ArtifactEnv as EnvIdentity
+from gen_worker.graphs.requirements import RequirementsManifest
+from gen_worker.graphs.store import LocalGraphStore
 from gen_worker.cli import daemon as daemon_mod
 from gen_worker.serving import DeployBinding, EndpointHost, load_endpoint
 
@@ -56,6 +56,7 @@ def test_zero_armed_is_a_warning_with_its_hole_reasons(
 
     store = LocalGraphStore(LocalCAS(tmp_path / "cas"))
     for record in document.lanes[0].graphs:
+        # A BARE PACKAGE on purpose — the format skew IS this test's subject.
         bare = tcg_artifacts.aoti_package(
             tmp_path / f"{record.graph[-8:]}.pt2",
             graph_specialization=record.graph,
@@ -83,12 +84,16 @@ def test_zero_armed_is_a_warning_with_its_hole_reasons(
     assert f"ZERO of {claimed} claimed graph(s) armed" in zero_lines[0].getMessage()
     reason_lines = [r for r in warnings if "hole " in r.getMessage()]
     assert reason_lines, "the WHY must ride the warning, not sit unread on the session"
-    assert any("ArtifactFormatSkew" in r.getMessage() for r in reason_lines), (
+    # tcg#90: the CLASS moved, the property did not. `ArtifactFormatSkew` died
+    # with torchcg's `artifact.py`; a bare package is now refused by the store
+    # when it cannot open the envelope. What this fence protects is that the
+    # reason is TYPED and NAMED in the warning — not which type it is.
+    assert any("StoreError" in r.getMessage() for r in reason_lines), (
         "the reason class the real loader raised must be named"
     )
 
     for hole in booted.holes:
-        assert "ArtifactFormatSkew" in hole.reason
+        assert "StoreError" in hole.reason
 
 
 def test_an_armed_boot_stays_quiet(
@@ -137,7 +142,7 @@ def test_the_handle_carries_hole_reasons_and_the_verdict(tmp_path: Path) -> None
         checkpoint_dir=tmp_path,
         adopted=(),
         holes=("cg-graph-v1-" + "a" * 56,),
-        hole_reasons=(("cg-graph-v1-" + "a" * 56, "ArtifactFormatSkew: bare package"),),
+        hole_reasons=(("cg-graph-v1-" + "a" * 56, "StoreError: artifact could not be read: not a gzip file"),),
     )
     resident = SimpleNamespace(
         booted=booted,
@@ -152,7 +157,7 @@ def test_the_handle_carries_hole_reasons_and_the_verdict(tmp_path: Path) -> None
     document = daemon_mod.ResidentEndpoint._document(cast(Any, resident), "ready")
     assert document["hole_reasons"] == [
         {"graph": "cg-graph-v1-" + "a" * 56,
-         "reason": "ArtifactFormatSkew: bare package"}
+         "reason": "StoreError: artifact could not be read: not a gzip file"}
     ]
     assert document["adoption"] == {"engaged": True, "armed": 0, "claimed": 1}
 
@@ -230,7 +235,7 @@ def test_the_armed_zero_verdict_is_a_durable_row_not_a_log_line(
     tmp_path: Path, wire: "list[tuple]", caplog: pytest.LogCaptureFixture
 ) -> None:
     import tcg_artifacts
-    from gen_worker._vendor.torchcg.requirements import RequirementsManifest
+    from gen_worker.graphs.requirements import RequirementsManifest
     from test_serving_adopt_first import fresh_host, publish_document
 
     binding = make_binding(tmp_path)
@@ -239,6 +244,7 @@ def test_the_armed_zero_verdict_is_a_durable_row_not_a_log_line(
     document = publish_document(host)
     store = LocalGraphStore(LocalCAS(tmp_path / "cas"))
     for record in document.lanes[0].graphs:
+        # A BARE PACKAGE on purpose — the format skew IS this test's subject.
         bare = tcg_artifacts.aoti_package(
             tmp_path / f"{record.graph[-8:]}.pt2",
             graph_specialization=record.graph)
@@ -255,7 +261,7 @@ def test_the_armed_zero_verdict_is_a_durable_row_not_a_log_line(
     rows = [row for row in wire if row[1] == "armed_zero"]
     assert len(rows) == 1, wire
     _kind, _phase, detail, counts = rows[0]
-    assert "armed ZERO" in detail and "ArtifactFormatSkew" in detail
+    assert "armed ZERO" in detail and "StoreError" in detail
     assert counts["step"] == 0 and counts["total_steps"] == len(
         document.lanes[0].graphs)
 

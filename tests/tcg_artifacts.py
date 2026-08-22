@@ -5,9 +5,10 @@ import zipfile
 from pathlib import Path
 from typing import Any, Dict, Mapping, Optional
 
-from gen_worker._vendor.torchcg import CallIngress, CallInput, GraphSpecializationDeclaration
-from gen_worker._vendor.torchcg.artifact import build_metadata, pack_artifact
-from gen_worker._vendor.torchcg.host_isa import _host_requirement
+from gen_worker._vendor.torchcg import CallIngress, CallInput
+from gen_worker._vendor.torchcg.identity import artifact_key, contiguous_handle, host_facts
+from gen_worker._vendor.torchcg.mint import compile_policy
+from gen_worker._vendor.torchcg.store import pack, unpack
 
 TOOLCHAIN: Dict[str, str] = {"torch": "record-digest", "triton": "compiler-digest"}
 
@@ -15,9 +16,14 @@ GRAPH_CLASS = "denoiser/h=64,w=64"
 TARGET = "unet"
 
 
+#: A graph hash the fixture's artifacts claim. Shaped like a real one because
+#: `is_graph_hash` refuses anything else at the document boundary.
+GRAPH = "cg-graph-v1-" + "a" * 56
+
+
 def host_isa() -> Dict[str, str]:
     """This machine's own ISA facts — the only ones TCG will admit here."""
-    return _host_requirement().facts()
+    return host_facts()
 
 
 def aoti_package(path: Path, *, graph_specialization: str = GRAPH_CLASS,
@@ -62,46 +68,45 @@ def metadata(
     sm: str = "sm_89",
     toolchain: Optional[Mapping[str, str]] = None,
 ) -> Dict[str, Any]:
-    """Metadata whose stamped ``compiled_graph_key`` TCG derives from itself."""
+    """Metadata in the shape a real mint stamps, with a key derived the same way.
+
+    tcg#90: the old `graph_specialization` block, `graph_witness`,
+    `range_digest` and `host_isa` sections are gone — an artifact now carries
+    ONE key over (graph x env x layout x policy x sm) and the ingress directly.
+    `witness` survives as a parameter so a caller can make two artifacts differ;
+    it rides in the graph hash, which is where "these are different graphs"
+    belongs.
+    """
+
     ingress = CallIngress(
         parameters=("value",),
         flat_arity=1,
         inputs=(CallInput("value", 0, "value", 0, (), "value", "float32", (2,)),),
     )
-    graph: Dict[str, Any] = {
-        "v": 4,
-        "constant_fqns": [],
+    env = {**dict(toolchain or TOOLCHAIN), **host_isa()}
+    graph = "cg-graph-v1-" + (witness * 8)[:56]
+    policy = compile_policy("cuda" if sm.startswith("sm_") else "cpu")
+    key = artifact_key(
+        graph, sm=sm, env=env, policy=policy, layout=contiguous_handle()
+    ).value
+    return {
+        "kind": "aot-inductor",
+        "key": key,
+        "graph": graph,
+        "name": graph_specialization,
+        "target": TARGET,
+        "sm": sm,
+        "env": env,
+        "compile_policy": policy,
+        "declared_input_layout": contiguous_handle(),
+        # ALWAYS written by a real mint, empty included (pgw#1645) — an absent
+        # field and "the mint asked for nothing" are different facts.
+        "layout_wishlist": [],
+        "placement": ["cuda:0"] if sm.startswith("sm_") else ["cpu"],
         "ingress": ingress.as_dict(),
+        "passes": [],
+        "constants": {"literal": [], "state": []},
     }
-    declaration = GraphSpecializationDeclaration(
-        name=graph_specialization,
-        target=TARGET,
-        graph=graph,
-        graph_witness=witness,
-        range_digest=ingress.digest(),
-        literal_values="",
-    )
-    return build_metadata(
-        graph_specialization={
-            "name": declaration.name,
-            "target": declaration.target,
-            "specialization_hash": declaration.specialization_hash,
-            "graph": dict(declaration.graph),
-            "graph_witness": declaration.graph_witness,
-            "range_digest": declaration.range_digest,
-            "fork": [],
-            "specialization_dims": [],
-            "strict": True,
-            "lora_bucket": 0,
-            "literal_values": declaration.literal_values,
-            "literal_payload_values": "",
-            "placement": list(declaration.placement),
-            "constants": [],
-        },
-        sm=sm,
-        toolchain=dict(toolchain or TOOLCHAIN),
-        host_isa=host_isa(),
-    )
 
 
 def build(
@@ -114,23 +119,33 @@ def build(
     filler: str = "",
 ) -> Path:
     """One real artifact at ``output``; its key is stamped in its metadata."""
-    package = output.parent / f".{output.name}.pt2"
+    import json
+    import tempfile
+
     output.parent.mkdir(parents=True, exist_ok=True)
-    aoti_package(package, graph_specialization=graph_specialization, filler=filler)
-    try:
-        return pack_artifact(
-            package, output,
-            metadata(graph_specialization=graph_specialization, witness=witness, sm=sm,
-                     toolchain=toolchain))
-    finally:
-        package.unlink(missing_ok=True)
+    with tempfile.TemporaryDirectory(prefix="tcg-fixture-") as raw:
+        staging = Path(raw)
+        aoti_package(
+            staging / "model.pt2",
+            graph_specialization=graph_specialization,
+            filler=filler,
+        )
+        (staging / "metadata.json").write_text(json.dumps(metadata(
+            graph_specialization=graph_specialization, witness=witness, sm=sm,
+            toolchain=toolchain,
+        ), sort_keys=True, indent=2))
+        return pack(staging, output)
 
 
 def key_of(artifact: Path) -> str:
-    """The ``ck1`` key the artifact states about itself."""
-    from gen_worker._vendor.torchcg.artifact import read_metadata
+    """The key the artifact states about itself."""
+    import json
+    import tempfile
 
-    return str(read_metadata(artifact).get("compiled_graph_key") or "")
+    with tempfile.TemporaryDirectory(prefix="tcg-key-") as raw:
+        directory = unpack(artifact, Path(raw))
+        stamped = json.loads((directory / "metadata.json").read_text())
+    return str(stamped.get("key") or "")
 
 
 def unpacked(
@@ -142,8 +157,6 @@ def unpacked(
     toolchain: Optional[Mapping[str, str]] = None,
 ) -> Path:
     """A real UNPACKED artifact directory at ``destination``."""
-    from gen_worker._vendor.torchcg.artifact import unpack_artifact
-
     envelope = destination.parent / f".{destination.name}.envelope.tar.gz"
     build(
         envelope,
@@ -153,7 +166,7 @@ def unpacked(
         toolchain=toolchain,
     )
     try:
-        unpack_artifact(envelope, destination)
+        unpack(envelope, destination)
     finally:
         envelope.unlink(missing_ok=True)
     return destination

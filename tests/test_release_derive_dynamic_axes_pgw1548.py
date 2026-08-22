@@ -113,9 +113,9 @@ def test_the_dynamic_records_still_dispatch_every_observed_shape(
 ) -> None:
     """A collapsed record must ADMIT what the fan it replaced admitted."""
 
-    from gen_worker._vendor.torchcg.adopt import _matches
-    from gen_worker._vendor.torchcg.document import GraphRecord
-    from gen_worker._vendor.torchcg.ingress import CallIngress
+    from gen_worker._vendor.torchcg.adopt import fit
+    from gen_worker.graphs.document import GraphRecord
+    from gen_worker._vendor.torchcg.identity import CallIngress
 
     raw = lanes["aspect"]["graphs"][0]
     record = GraphRecord(
@@ -127,8 +127,10 @@ def test_the_dynamic_records_still_dispatch_every_observed_shape(
     text = rows["encoder_hidden_states"]
 
     def call(batch: int, height: int, width: int) -> bool:
-        return _matches(
-            record,
+        # tcg#90: `_matches` is gone — `fit` IS the admission decision, and it
+        # returns the refusal sentence alongside it rather than a bare bool.
+        gap, _recasts, _passed = fit(
+            record.ingress,
             (),
             {
                 "sample": torch.zeros(
@@ -144,6 +146,7 @@ def test_the_dynamic_records_still_dispatch_every_observed_shape(
                 ),
             },
         )
+        return gap == ""
 
     mine = int(rows["sample"].shape[0])
     for height, width in ((64, 64), (80, 48), (48, 80)):

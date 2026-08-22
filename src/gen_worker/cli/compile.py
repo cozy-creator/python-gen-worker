@@ -129,7 +129,6 @@ def order(specs: Tuple[Spec, ...], selector: str) -> Tuple[Spec, ...]:
 
 
 def _env_identity(endpoint_dir: Path, sm: str, lockfile: Optional[Path]) -> Any:
-    from .._vendor.torchcg.graph_identity import EnvIdentity
     from ..env_identity import (
         EnvIdentityError,
         compile_stack_from_lockfile,
@@ -148,7 +147,9 @@ def _env_identity(endpoint_dir: Path, sm: str, lockfile: Optional[Path]) -> Any:
         stack = compile_stack_from_lockfile(Path(resolved), bucket=cuda_bucket())
     except EnvIdentityError as exc:
         raise CompileError(f"{resolved}: {exc}") from exc
-    return EnvIdentity(stack=stack, sm=sm)
+    from ..graphs.env import require_env
+
+    return require_env(stack, sm)
 
 
 def _store(cas_root: Path) -> Any:
@@ -318,7 +319,7 @@ def witness_materializes(cas_root: Path, graph: str, env: Any) -> Optional[str]:
     """Fetch through the store adoption uses and OPEN through the real loader."""
     import tempfile
 
-    from .._vendor.torchcg.serve import materialize
+    from .._vendor.torchcg.store import read_metadata, unpack
 
     reader = serving_reader(cas_root)
     with tempfile.TemporaryDirectory(prefix="pgw1561-witness-") as raw:
@@ -330,14 +331,17 @@ def witness_materializes(cas_root: Path, graph: str, env: Any) -> Optional[str]:
         if fetched is None:
             return f"absent at ({graph[:16]}, {env.value})"
         try:
-            materialize(fetched, Path(raw) / "unpacked")
+            # Unpack refuses any member the envelope should not carry, and
+            # read_metadata re-asserts the fold policy the artifact claims —
+            # the two questions the old `materialize` asked in one call.
+            read_metadata(unpack(fetched, Path(raw) / "unpacked"))
         except Exception as exc:  # noqa: BLE001 — an unloadable blob is the verdict
             return f"fetched but does not MATERIALIZE ({type(exc).__name__}: {exc})"
     return None
 
 
 def _publish_document(cas_root: Path, lock_path: Path, module: str) -> None:
-    from .._vendor.torchcg.document import GraphSetDocument
+    from ..graphs.document import GraphSetDocument
 
     block = el.read_derive_block(lock_path)
     if block is None:
@@ -352,58 +356,62 @@ def _publish_document(cas_root: Path, lock_path: Path, module: str) -> None:
     )
 
 
-class _EngineReuse:
+class _ArtifactReuse:
+    """Have we already minted this graph for this machine?
+
+    One content-addressed lookup per graph, replacing torchcg's
+    `Engine.reuse_index`. That index existed because the old key was reachable
+    only through the engine; with ONE key the question is just an address, so
+    there is nothing to enumerate, nothing to cache, and no window in which the
+    index disagrees with the store.
+
+    **The env this keys with must be the env the MINT keys with**, and that is
+    `toolchain_digest()` — what `_default_builder` hands the child at
+    `"toolchain"`. Keying reuse off the lockfile compile stack instead looks
+    reasonable and is silently wrong: the two blocks differ, so every lookup
+    misses and `gen-worker compile` rebuilds artifacts it already holds. There
+    is no error, only a bill. Read the env from ONE place so the two cannot
+    drift.
+    """
 
     def __init__(self, cas_root: Path, sm: str) -> None:
         self._cas_root = Path(cas_root)
         self._sm = sm
-        self._engine: Any = None
-        self._index: Optional[Dict[str, str]] = None
+        self._store: Any = None
 
-    def _load(self) -> None:
+    def _opened(self) -> Any:
+        if self._store is None:
+            from .._vendor.tensorfs import LocalCAS
+            from .._vendor.torchcg.store import Store
+
+            self._store = Store(LocalCAS(self._cas_root))
+        return self._store
+
+    def _key(self, graph: str) -> str:
+        from .._vendor.torchcg.identity import artifact_key
+        from .._vendor.torchcg.mint import compile_policy, declared_input_layout
+
         from ..toolchain import toolchain_digest
-        from .._vendor.tensorfs import LocalCAS
-        from .._vendor.torchcg.engine import Engine
 
-        self._engine = Engine(LocalCAS(self._cas_root))
-        try:
-            self._index = dict(
-                self._engine.reuse_index(self._sm, dict(toolchain_digest()))
-            )
-        except Exception as exc:  # noqa: BLE001 — an unreadable cache is a miss
-            logger.warning(
-                "compile: engine reuse index unavailable (%s: %s); every miss "
-                "will build", type(exc).__name__, exc,
-            )
-            self._index = {}
-        if self._index:
-            logger.info(
-                "compile: engine cache holds %d already-minted artifact(s) for "
-                "this (sm x toolchain); reusing instead of rebuilding",
-                len(self._index),
-            )
-
-    def offers(self, graph: str) -> bool:
-        """Whether the cache CLAIMS a mint for ``graph`` — an address answer; the claim is only trusted after :meth:`resolve` fully verifies it."""
-        if self._index is None:
-            self._load()
-        assert self._index is not None
-        return graph in self._index
+        device = "cuda" if self._sm.startswith("sm_") else "cpu"
+        return artifact_key(
+            graph,
+            sm=self._sm,
+            env=dict(toolchain_digest()),
+            policy=compile_policy(device),
+            layout=declared_input_layout(),
+        ).value
 
     def resolve(self, spec: Spec, destination: Path) -> Optional[Path]:
         """The verified artifact directory for ``spec``, or ``None`` to build."""
-        if self._index is None:
-            self._load()
-        assert self._index is not None
-        key = self._index.get(spec.graph)
-        if key is None:
-            return None
+
         try:
-            found = self._engine.resolve(key, destination)
+            key = self._key(spec.graph)
+            found = self._opened().get(key, Path(destination))
         except Exception as exc:  # noqa: BLE001 — a rotten row costs a rebuild
             logger.warning(
-                "%s: engine-cache reuse of %s failed (%s: %s); building",
-                spec.short, key, type(exc).__name__, exc,
+                "%s: cached-artifact reuse failed (%s: %s); building",
+                spec.short, type(exc).__name__, exc,
             )
             return None
         return Path(destination) if found is not None else None
@@ -527,7 +535,7 @@ def compile_all(
             return False
         return True
 
-    reuse = _EngineReuse(Path(cas_root), sm)
+    reuse = _ArtifactReuse(Path(cas_root), sm)
 
     from ..serving.mint import publish_compiled
 

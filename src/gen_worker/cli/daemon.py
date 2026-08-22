@@ -157,7 +157,7 @@ def _adoption_source(spec: BootSpec, module_name: str) -> Tuple[Any, Any]:
             "--sm is required to adopt compiled graphs (artifacts are per-sm). "
             "Omit --graph-store to serve eager."
         )
-    from .._vendor.torchcg.store import StoreError
+    from ..graphs.store import StoreError
     from ..serving.mint_store import graph_store
 
     store = graph_store(Path(spec.graph_store))
