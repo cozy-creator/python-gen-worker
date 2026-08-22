@@ -36,6 +36,20 @@ from .lane import LaneError, require_lane_id, require_passes, require_targets
 # old document keeps its identity and every already-minted artifact stays
 # addressable. Only the row KEY the graphs hang off is respelled.
 DOCUMENT_FORMAT = 4
+
+#: The graph-interface version a lock records so it can ask "may I reuse this
+#: trace instead of re-deriving?".
+#:
+#: HELD AT 4 across the tcg#90 rebuild, deliberately. torchcg's `declaration.py`
+#: — which owned this constant and the `{v, constant_fqns, ingress}` object it
+#: described — is gone, so the STRUCTURE it named no longer exists. But the
+#: question this number is asked is about TRACE REUSE, and the rebuild's graph
+#: hashes are byte-identical to the old tree's (proven against a checked-in
+#: bank). Bumping it would force every existing lock to re-derive traces that
+#: would hash to exactly what they already hold. Artifacts DO re-mint — the
+#: artifact key scheme moved — but that is a different address and a different
+#: question.
+GRAPH_INTERFACE_FORMAT = 4
 _DOCUMENT_FIELDS = frozenset(("v", "stack", "lanes"))
 _LANE_FIELDS = frozenset(
     ("contract", "targets", "graphs", "unobserved_targets", "passes")

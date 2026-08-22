@@ -267,4 +267,12 @@ def read_metadata(directory: Path) -> dict[str, Any]:
     return stamped
 
 
-__all__ = ["Store", "StoredArtifact", "pack", "read_metadata", "unpack"]
+__all__ = [
+    "KeyAlreadyMinted",
+    "Store",
+    "StoreError",
+    "StoredArtifact",
+    "pack",
+    "read_metadata",
+    "unpack",
+]

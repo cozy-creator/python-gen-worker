@@ -27,6 +27,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import platform
 import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -79,6 +80,130 @@ def is_artifact_key(value: object) -> bool:
         and len(value) <= MAX_KEY_LENGTH
         and _KEY_RE.fullmatch(value) is not None
     )
+
+
+# ---------------------------------------------------------------------------
+# Host ISA -- the one env fact this package decides for itself
+# ---------------------------------------------------------------------------
+
+_X86_LEVELS: tuple[tuple[str, frozenset[str]], ...] = (
+    ("x86-64", frozenset()),
+    ("x86-64-v2", frozenset({"cx16", "lahf_lm", "popcnt", "sse4_1", "sse4_2", "ssse3"})),
+    (
+        "x86-64-v3",
+        frozenset({"abm", "avx", "avx2", "bmi1", "bmi2", "f16c", "fma", "movbe", "xsave"}),
+    ),
+)
+
+
+def _host_isa() -> tuple[str, str | None, int | None]:
+    """(machine, march, simdlen). Compiles CLAMP to x86-64-v3.
+
+    Above v3 nothing is gained that the fleet can rely on, and every v3-or-
+    better x86 host then records identical ISA facts -- which is what lets one
+    artifact serve an AVX2 EPYC 7713 and an AVX512 EPYC 9655P.
+    """
+
+    machine = platform.machine()
+    if not machine:
+        raise IdentityError("platform states no host machine")
+    if machine != "x86_64":
+        return machine, None, None
+    try:
+        text = Path("/proc/cpuinfo").read_text()
+    except OSError as exc:
+        raise IdentityError(f"cannot read /proc/cpuinfo: {exc}") from exc
+    features = {
+        flag
+        for line in text.splitlines()
+        if line.split(":", 1)[0].strip() in ("flags", "Features")
+        for flag in line.split(":", 1)[1].split()
+    }
+    if not features:
+        raise IdentityError("/proc/cpuinfo states no CPU flags")
+    level = isa_level(features)
+    return machine, level, 256 if level == "x86-64-v3" else 128
+
+
+def isa_level(features: frozenset[str] | set[str]) -> str:
+    """The highest x86-64 level one `/proc/cpuinfo` flag set satisfies.
+
+    Separate and public so the classification can be asked about a stated flag
+    set rather than only about whichever CPU the test happens to run on -- a
+    guard that can only read this host is a guard that agrees with whatever this
+    host does.
+    """
+
+    level = "x86-64"
+    for name, required in _X86_LEVELS:
+        if required <= set(features):
+            level = name
+    return level
+
+
+def host_facts() -> dict[str, str]:
+    """The ISA facts this host mints under. PURE -- reads, changes nothing.
+
+    Deliberately torch-free and separate from the CLAMP (`torchcg.mint.
+    impose_host_policy`), which needs torch because it writes inductor's config.
+    Key derivation must be able to ask this question in a process that never
+    imports torch: `resolve` and the cold reuse path are exactly that, and they
+    still have to compute the address they are looking up.
+    """
+
+    machine, march, simdlen = _host_isa()
+    return {
+        "machine": machine,
+        "cpp_march": march or "",
+        "cpp_simdlen": "" if simdlen is None else str(simdlen),
+    }
+
+
+def imposed_env(env: Mapping[str, str]) -> dict[str, str]:
+    """The caller's env fingerprint with the host ISA facts MERGED IN.
+
+    The env block's members are deliberately the caller's to choose -- except
+    these. The ISA is the one environment fact this package decides (it clamps
+    `cpp.march` and `cpp.simdlen` before every compile), so leaving it to the
+    caller means leaving it OPTIONAL, and an optional key axis is one that is
+    eventually omitted.
+
+    What that costs is concrete: an artifact compiled at `x86-64-v2` and one at
+    `x86-64-v3` differ in emitted instructions and in nothing else the key can
+    see, so they would share one address. Not hypothetical -- this library
+    shipped an ISA table that silently demoted every Intel host to v2, and
+    nothing in the key would have recorded which of the two an artifact was.
+
+    Called by :func:`artifact_key` itself rather than by the mint, so a caller
+    RE-DERIVING a key to look one up cannot forget it and miss its own artifact.
+
+    A caller that states one of these facts must state it correctly; disagreeing
+    is a refusal, never a silent overwrite, because the disagreement means the
+    caller believes something false about the machine it is on.
+    """
+
+    # The caller's half is checked BEFORE the merge, because after it the block
+    # is never empty and a "states nothing" guard could no longer fire. An env
+    # that cannot name torch is describing a machine that cannot compile, and
+    # would let two torch versions share one address.
+    if not any(str(name).strip().lower() == "torch" for name in env):
+        raise IdentityError(
+            "an env fingerprint states torch: it is the compiler, and a key "
+            "without it collides across torch versions. The other members are "
+            "the caller's to choose; this one is not"
+        )
+    imposed = host_facts()
+    merged = dict(env)
+    for name, value in imposed.items():
+        stated = merged.get(name)
+        if stated is not None and stated != value:
+            raise IdentityError(
+                f"env states {name}={stated!r} and this host imposes {value!r}. "
+                f"The ISA facts are measured here, not supplied: a mint cannot "
+                f"key as one machine and compile on another."
+            )
+        merged[name] = value
+    return merged
 
 
 # ---------------------------------------------------------------------------
@@ -1203,7 +1328,9 @@ class ArtifactKey:
             raise IdentityError(
                 f"sm must be a concrete 'sm_NN' or cpu capability, got {self.sm!r}"
             )
-        object.__setattr__(self, "env", dict(self.env))
+        # Imposed HERE, so a caller re-deriving a key to look one up cannot
+        # forget it and miss its own artifact.
+        object.__setattr__(self, "env", imposed_env(self.env))
         object.__setattr__(self, "policy", dict(self.policy))
         _block_digest("env fingerprint", self.env, (str,))
         _block_digest("compile policy", self.policy, (bool, int, str))
@@ -1266,9 +1393,12 @@ __all__ = [
     "contiguous_handle",
     "exported_input_name",
     "graph_hash",
+    "host_facts",
+    "imposed_env",
     "is_artifact_key",
     "is_compile_relevant",
     "is_graph_hash",
+    "isa_level",
     "literal_digest",
     "literal_names",
     "placement",

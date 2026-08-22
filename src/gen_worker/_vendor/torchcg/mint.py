@@ -9,7 +9,6 @@ what the artifact would claim.
 from __future__ import annotations
 
 import json
-import platform
 import tempfile
 import threading
 from collections.abc import Iterator, Mapping
@@ -21,6 +20,7 @@ from typing import Any, cast
 
 from .identity import (
     CallIngress,
+    _host_isa,
     constant_names,
     contiguous_handle,
     graph_hash,
@@ -165,60 +165,7 @@ def declared_input_layout() -> str:
 #: and was classified v2, costing AVX2 and FMA in every artifact it minted.
 #: The `f16c`/`xsave`/`lahf_lm` members are part of the levels and are equally
 #: easy to leave out; they are listed for the same reason.
-_X86_LEVELS: tuple[tuple[str, frozenset[str]], ...] = (
-    ("x86-64", frozenset()),
-    ("x86-64-v2", frozenset({"cx16", "lahf_lm", "popcnt", "sse4_1", "sse4_2", "ssse3"})),
-    (
-        "x86-64-v3",
-        frozenset({"abm", "avx", "avx2", "bmi1", "bmi2", "f16c", "fma", "movbe", "xsave"}),
-    ),
-)
 _LOCK = threading.RLock()
-
-
-def _host_isa() -> tuple[str, str | None, int | None]:
-    """(machine, march, simdlen). Compiles CLAMP to x86-64-v3.
-
-    Above v3 nothing is gained that the fleet can rely on, and every v3-or-
-    better x86 host then records identical ISA facts -- which is what lets one
-    artifact serve an AVX2 EPYC 7713 and an AVX512 EPYC 9655P.
-    """
-
-    machine = platform.machine()
-    if not machine:
-        raise MintError("platform states no host machine")
-    if machine != "x86_64":
-        return machine, None, None
-    try:
-        text = Path("/proc/cpuinfo").read_text()
-    except OSError as exc:
-        raise MintError(f"cannot read /proc/cpuinfo: {exc}") from exc
-    features = {
-        flag
-        for line in text.splitlines()
-        if line.split(":", 1)[0].strip() in ("flags", "Features")
-        for flag in line.split(":", 1)[1].split()
-    }
-    if not features:
-        raise MintError("/proc/cpuinfo states no CPU flags")
-    level = isa_level(features)
-    return machine, level, 256 if level == "x86-64-v3" else 128
-
-
-def isa_level(features: frozenset[str] | set[str]) -> str:
-    """The highest x86-64 level one `/proc/cpuinfo` flag set satisfies.
-
-    Separate and public so the classification can be asked about a stated flag
-    set rather than only about whichever CPU the test happens to run on -- a
-    guard that can only read this host is a guard that agrees with whatever this
-    host does.
-    """
-
-    level = "x86-64"
-    for name, required in _X86_LEVELS:
-        if required <= set(features):
-            level = name
-    return level
 
 
 def impose_host_policy() -> dict[str, str]:
@@ -708,51 +655,13 @@ def metadata(spec: GraphSpec, *, key: str, sm: str, env: Mapping[str, str],
     }
 
 
-def imposed_env(env: Mapping[str, str]) -> dict[str, str]:
-    """The caller's env fingerprint with the host ISA facts MERGED IN.
-
-    The env block's members are deliberately the caller's to choose -- except
-    these. The ISA is the one environment fact this package itself decides (it
-    clamps `cpp.march` and `cpp.simdlen` before every compile), so leaving it to
-    the caller means leaving it OPTIONAL, and an optional key axis is one that
-    is eventually omitted.
-
-    What that costs is concrete: an artifact compiled at `x86-64-v2` and one
-    compiled at `x86-64-v3` differ in emitted instructions and in nothing the
-    rest of the key can see, so they would share one address and the second mint
-    would be refused as already-present -- serving v2 code to a fleet that keyed
-    for v3. That is not hypothetical here: this lane shipped an ISA table that
-    silently demoted every Intel host to v2, and nothing in the key would have
-    recorded which of the two an artifact actually was.
-
-    A caller that states one of these facts must state it correctly; disagreeing
-    is a refusal, never a silent overwrite, because the disagreement means the
-    caller believes something false about the machine it is minting on.
-    """
-
-    imposed = impose_host_policy()
-    merged = dict(env)
-    for name, value in imposed.items():
-        stated = merged.get(name)
-        if stated is not None and stated != value:
-            raise MintError(
-                f"env states {name}={stated!r} and this host imposes {value!r}. "
-                f"The ISA facts are measured here, not supplied: a mint cannot "
-                f"key as one machine and compile on another."
-            )
-        merged[name] = value
-    return merged
-
-
 @dataclass(frozen=True, slots=True)
 class Minted:
     """One minted artifact and the identity it was minted under.
 
-    The key is RETURNED rather than left for the caller to re-derive. It cannot
-    be re-derived reliably: `mint` imposes the host ISA facts into the env, so a
-    caller repeating `artifact_key(...)` with the env it passed in computes a
-    DIFFERENT address and then cannot find its own artifact. A function that
-    decides an identity hands it back.
+    The key is RETURNED rather than left for the caller to re-derive, and
+    ``env`` is what was ACTUALLY keyed: `artifact_key` imposes the host ISA
+    facts, so the block here may carry more than the caller passed in.
     """
 
     key: str
@@ -776,14 +685,15 @@ def mint(
     asking earlier asks the wrong program).
 
     ``env``'s other members are the caller's to choose; the host ISA facts are
-    not, and are merged in here (see :func:`imposed_env`).
+    imposed by :func:`~torchcg.identity.artifact_key` itself, so the key this
+    returns may carry more than the caller passed in -- which is why it is
+    RETURNED rather than left to be re-derived.
     """
 
     from .identity import artifact_key
 
     bound = bind_static_spec(spec)
     assert_device_uniform(bound.program, bound.graph)
-    env = imposed_env(env)
     key = artifact_key(
         bound.graph,
         sm=sm,
@@ -799,7 +709,8 @@ def mint(
         write_literals(bound.program, workspace / "constants.safetensors")
         (workspace / "metadata.json").write_text(
             json.dumps(
-                metadata(bound, key=key.value, sm=sm, env=env, device_type=device_type),
+                metadata(bound, key=key.value, sm=sm, env=dict(key.env),
+                         device_type=device_type),
                 sort_keys=True,
                 indent=2,
             )
@@ -807,7 +718,7 @@ def mint(
         from .store import pack
 
         pack(workspace, destination)
-    return Minted(key=key.value, path=destination, env=env)
+    return Minted(key=key.value, path=destination, env=dict(key.env))
 
 
 __all__ = [
@@ -825,8 +736,6 @@ __all__ = [
     "declared_ranges",
     "format_narrowing",
     "impose_host_policy",
-    "imposed_env",
-    "isa_level",
     "live_ranges",
     "metadata",
     "mint",
