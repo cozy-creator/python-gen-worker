@@ -31,7 +31,9 @@ def _request(tmp_path: Path) -> dict[str, Any]:
     torch.export.save(program, blob)
     return {
         "blob": str(blob),
-        "graph": "denoiser/h=8",
+        # tcg#90: the graph field IS the graph hash now — it is a key axis,
+        # not a free-form specialization name, so a name no longer parses.
+        "graph": "cg-graph-v1-" + "e" * 56,
         "target": "projection",
         "ingress": ingress.as_dict(),
         "target_arch": "cpu",

@@ -118,16 +118,42 @@ def compile_one(request: Mapping[str, Any]) -> Path:
     )
     target_arch = str(request["target_arch"])
     destination = Path(str(request["destination"]))
-    # The parent reads back a PATH; the key rides in the artifact's own
-    # metadata, which is what `publish_artifact` reads, so the child protocol
-    # does not have to carry it separately.
-    mint(
-        spec,
-        sm=target_arch,
-        env=dict(request["toolchain"]),
-        device_type="cuda" if target_arch.startswith("sm_") else "cpu",
-        destination=destination,
-    )
+    # `mint` produces a packed ENVELOPE; the parent wants `destination` to be an
+    # UNPACKED artifact directory — `artifact_package` and `compiled_object_bytes`
+    # both read it that way, and the old `Engine.compile` left one there because
+    # it resolved through the store on the way out.
+    #
+    # So unpack rather than change either side: the envelope is the transport
+    # shape and the directory is the handoff shape, and `unpack` is the same
+    # admission (closed member list, metadata refusals) the serving path uses.
+    import tempfile
+
+    from .._vendor.tensorfs import LocalCAS
+    from .._vendor.torchcg.refuse import KeyAlreadyMinted
+    from .._vendor.torchcg.store import Store, unpack
+
+    with tempfile.TemporaryDirectory(prefix="mint-child-") as scratch:
+        envelope = Path(scratch) / "artifact.tar.gz"
+        # The parent reads back a PATH; the key rides in the artifact's own
+        # metadata, which is what `publish_artifact` reads, so the child
+        # protocol does not have to carry it separately.
+        minted = mint(
+            spec,
+            sm=target_arch,
+            env=dict(request["toolchain"]),
+            device_type="cuda" if target_arch.startswith("sm_") else "cpu",
+            destination=envelope,
+        )
+        # The child STORES as well as compiles — `Engine.compile` did both, and
+        # a compile whose bytes never reach the CAS is a build that returned
+        # without producing anything the serving path can find.
+        try:
+            Store(LocalCAS(Path(str(request["cas"])))).put(minted.key, minted.path)
+        except KeyAlreadyMinted:
+            # Mint-once: another writer got there first and its artifact stands.
+            pass
+        destination.mkdir(parents=True, exist_ok=True)
+        unpack(envelope, destination)
     return destination
 
 

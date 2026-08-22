@@ -179,9 +179,11 @@ def test_what_the_mint_PUBLISHED_is_opened_by_the_REAL_boot_loader(
             f"{fetched} is not the tar+gzip envelope the boot loader reads")
 
     graph = open_artifact(fetched, tmp_path / "unpacked")
-    assert graph.key, "the materialized artifact states no compiled_graph_key"
+    assert graph.key, "the materialized artifact states no key"
     assert graph.package.is_file(), "no model.pt2 inside the envelope"
-    assert graph.metadata.get("compiled_graph_key") == graph.key
+    # tcg#90: the stamped field is `key`; `compiled_graph_key` was the
+    # two-scheme era's name for the same fact.
+    assert graph.metadata.get("key") == graph.key
 
 
 def test_a_compiler_that_hands_back_the_bare_package_publishes_NOTHING(
