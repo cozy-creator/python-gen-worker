@@ -33,8 +33,28 @@ MANIFEST = ROOT / "src" / "gen_worker" / "_vendor" / "VENDORED.toml"
 PYPROJECT = ROOT / "pyproject.toml"
 LOCK = ROOT / "uv.lock"
 
+#: Import rewrites applied to a vendored tree so it reaches its VENDORED peers
+#: rather than whatever happens to be installed.
+#:
+#: The indentation group is load-bearing and was missing until pgw#1656: the
+#: pattern was anchored at `^`, so a LAZY import — `from tensorfs import ...`
+#: inside a function, which torchcg uses deliberately to keep its cold resolve
+#: path torch-free — was left pointing at the top-level package. That fails
+#: closed only by luck: it raises where the installed tensorfs is older, and
+#: silently uses the WRONG COPY where it is merely different, which is the
+#: outcome vendoring exists to prevent.
 MECHANICAL_REWRITES: dict[str, list[tuple[str, str]]] = {
-    "torchcg": [(r"(?m)^from tensorfs import ", "from ..tensorfs import ")],
+    "torchcg": [(r"(?m)^([ \t]*)from tensorfs import ", r"\1from ..tensorfs import ")],
+}
+
+#: After rewriting, no spelling of a NON-vendored sibling may survive. A rewrite
+#: rule that silently matches nothing is how the bug above lived: the script
+#: printed a cheerful `rewrite: store.py` for the one file it did catch.
+FORBIDDEN_AFTER_REWRITE: dict[str, list[tuple[str, str]]] = {
+    "torchcg": [
+        (r"(?m)^[ \t]*from tensorfs import ", "an unrewritten `from tensorfs import`"),
+        (r"(?m)^[ \t]*import tensorfs\b", "a bare `import tensorfs`"),
+    ],
 }
 
 SKIP = {"__pycache__", ".git"}
@@ -113,6 +133,22 @@ def _extract(repo: str, rev: str, subdir: str, target: Path, package: str) -> No
                 if rewritten != text:
                     print(f"  rewrite: {path.relative_to(source)}")
                     path.write_text(rewritten)
+
+        for pattern, what in FORBIDDEN_AFTER_REWRITE.get(package, []):
+            offenders = [
+                f"{path.relative_to(source)}:{text[:m.start()].count(chr(10)) + 1}"
+                for path in _files(source)
+                if path.suffix == ".py"
+                for text in (path.read_text(),)
+                for m in re.finditer(pattern, text)
+            ]
+            if offenders:
+                raise SystemExit(
+                    f"{package}: {what} survives the vendor rewrite at "
+                    f"{', '.join(offenders)}. The vendored tree would reach an "
+                    f"INSTALLED sibling instead of the vendored one; fix the "
+                    f"rewrite rule rather than the symptom."
+                )
 
         shutil.rmtree(target)
         shutil.copytree(source, target)

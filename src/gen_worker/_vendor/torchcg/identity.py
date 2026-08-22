@@ -357,7 +357,7 @@ def _identity_morphism(root: Path | None = None) -> LayoutMorphism:
     nothing, and row-major is row-major without asking torch.
     """
 
-    from tensorfs import identity_arrangement
+    from ..tensorfs import identity_arrangement
 
     try:
         arrangement = identity_arrangement(root)
@@ -381,7 +381,7 @@ def _paired(root: Path | None = None) -> tuple[dict[str, LayoutMorphism], tuple[
     """
 
     try:
-        from tensorfs import layouts
+        from ..tensorfs import layouts
     except ImportError as exc:  # pragma: no cover - tensorfs is a hard dependency
         raise LayoutCorpusError(
             f"the ratified layout corpus is tensorfs' (spec/v2/layouts) and "
