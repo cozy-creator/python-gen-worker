@@ -89,7 +89,12 @@ KINDS: tuple[tuple[str, str], ...] = (
 #: CHANGE, which is what this constant asks for. `rules` did NOT move, so
 #: `lane_ladder._RULE_BODY` needed no new row — the fence in
 #: `test_lane_dtype_fence_pgw1606` would have failed if it had.
-EXPECTED_COUNTS = {"rules": 8, "topologies": 28, "morphisms": 5}
+#: Bumped 28 -> 33 by the pgw#1665 re-vendor to `07f9615` (tensorfs#153 + #158 +
+#: #161). `rules` again did NOT move as a SET — `cozy.fp8-rowwise` went @1 -> @2
+#: in place, one document either way — which is precisely why a count is not a
+#: migration check and `test_the_superseded_majors_are_exactly_these` below
+#: enumerates the version moves by name.
+EXPECTED_COUNTS = {"rules": 8, "topologies": 33, "morphisms": 5}
 
 
 def _documents(kind: str) -> dict[str, dict]:
@@ -294,8 +299,33 @@ def test_the_vendored_corpus_matches_the_pinned_upstream_rev() -> None:
     if these bytes are upstream's bytes at the pinned rev, then upstream's own
     conformance tests ran against them.
     """
-    if _upstream_blob("spec/v2/README.md") is None:
-        pytest.skip("no sibling tensorfs checkout carrying the pinned rev")
+    # pgw#1665: SKIP and REFUSE were one branch, and the difference is the whole
+    # value of the check. `git show <rev>:<path>` fails identically for "no
+    # sibling checkout" and "the pinned rev does not exist upstream" — and the
+    # second is reachable, because `vendor_snapshot.py` accepts any 40-hex
+    # string when `git ls-remote` cannot resolve it (`ls-remote` does not answer
+    # for a raw sha). MEASURED here: a mistyped sha re-pinned the whole snapshot
+    # and this test reported SKIPPED, green, on a rev that exists nowhere.
+    if not (UPSTREAM / ".git").exists():
+        pytest.skip("no sibling tensorfs checkout to compare against")
+    manifest = tomllib.loads((VENDOR / "VENDORED.toml").read_text())
+    rev = manifest["packages"]["tensorfs"]["rev"]
+    known = subprocess.run(
+        ["git", "-C", str(UPSTREAM), "cat-file", "-e", f"{rev}^{{commit}}"],
+        capture_output=True,
+    )
+    assert known.returncode == 0, (
+        f"the pinned tensorfs rev {rev} is not a commit in the sibling checkout "
+        f"at {UPSTREAM}. This REFUSES rather than skipping: a skip here is how a "
+        f"rev that exists nowhere passes review. If the sibling is merely stale, "
+        f"`git -C {UPSTREAM} fetch --all` and re-run; if it is not stale, the "
+        f"pin is wrong and every digest under it was computed against a tree "
+        f"nothing can reproduce."
+    )
+    assert _upstream_blob("spec/v2/README.md") is not None, (
+        f"tensorfs {rev[:12]} is a commit in the sibling checkout but carries no "
+        f"spec/v2/README.md — the pin names a rev from another lineage."
+    )
 
     checked = 0
     for path in sorted(SPEC_V2.rglob("*")):

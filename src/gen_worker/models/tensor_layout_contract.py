@@ -126,7 +126,9 @@ def capability_floor_for_rule(quant: object) -> int:
     permissive direction is the one that puts an nvfp4 lane on Ampere.
     """
     handle = str(quant or "").strip()
-    rule = quant_rules().get(handle)
+    resolved = resolve_declared_handle(
+        handle, axis=AXIS_QUANT, where="capability_floor_for_rule")
+    rule = quant_rules().get(resolved or "")
     if rule is None:
         raise LayoutDeclarationError(
             f"quant rule {handle!r} is not in the vendored v2 corpus, so its "
@@ -141,7 +143,9 @@ def rule_dtype(quant: object) -> str:
     """The torch spelling the rule DECLARES (``float8_e4m3fn``) — what a loader
     wants, and what the lane SERVES. Refuses an unknown handle, same reason."""
     handle = str(quant or "").strip()
-    rule = quant_rules().get(handle)
+    resolved = resolve_declared_handle(
+        handle, axis=AXIS_QUANT, where="rule_dtype")
+    rule = quant_rules().get(resolved or "")
     if rule is None:
         raise LayoutDeclarationError(
             f"quant rule {handle!r} is not in the vendored v2 corpus. Known: "
@@ -227,7 +231,8 @@ def _validate(dec: QuantRuleDecoder) -> None:
             f"{dec.decoder}: {dec.rule!r} is not a quant-rule handle "
             "(want ns.name@N)"
         )
-    if dec.rule not in quant_rules():
+    if resolve_declared_handle(
+            dec.rule, axis=AXIS_QUANT, where=dec.decoder) is None:
         raise ValueError(
             f"{dec.decoder}: quant rule {dec.rule!r} is not in the vendored v2 "
             f"corpus. Rules are RATIFIED DOCUMENTS, one per byte FORMAT ever: "
@@ -430,6 +435,214 @@ class LayoutDeclarationError(ValueError):
     """A `Slot(layouts=...)` declaration the SDK refuses where it is written."""
 
 
+# ── pgw#1665: a SUPERSEDED major RESOLVES; a major AHEAD refuses TYPED ────────
+#
+# tensorfs#153 does not add `@2` beside `@1`; it REPLACES the document. Nine
+# topologies (`sdxl.diffusers`, `sd15.diffusers`, `sd2.diffusers`,
+# `sdxl-inpainting.diffusers`, `sdxl.clip-g-fused`, `wan22.diffusers`,
+# `ernie.diffusers`, `ltx2-upsampler.diffusers`, `z-image.diffusers`), the
+# `cozy.fp8-rowwise` quant rule and the `sdxl.clip-g-split-to-fused` morphism
+# moved that way. Every `lanes={("sdxl.diffusers@1", …)}` in every endpoint and
+# every committed `endpoint.lock` names a document the vendored corpus no
+# longer carries, and membership here is a literal string match — so without
+# this the whole fleet refuses at CLASS DEFINITION, before a pod fetches a byte.
+#
+# This is th#2301's `tensorlayout.ResolveDeclaredContract`, hub-side, applied to
+# the other end of the same wire, and deliberately the same THREE rules:
+#
+#   1. EXACT FIRST. `anima.net@1` and `minimax-h3.diffusers@1` survive BESIDE
+#      their new `@2` records; an exact member is never "upgraded".
+#   2. A SUPERSEDED major resolves BY NAME to the newest the corpus carries.
+#   3. A major AHEAD of the corpus REFUSES, typed. That is the line th#2295's
+#      wire resolution did not draw: reading a layout this build has never seen
+#      as the older one it happens to hold decodes plausible numbers instead of
+#      failing, which is the wrong-pairing class the vocabulary exists to
+#      refuse. The two directions are opposite operator actions — re-vendor the
+#      worker, versus re-declare the endpoint — so they are two errors.
+#
+# WHAT THIS DOES NOT DO, also deliberately: it does not rewrite the author's
+# spelling. `parse_lane_stamp` still answers `sdxl.diffusers@1` for a class that
+# declared `sdxl.diffusers@1`, so the rendered `contract_id` — a derivation
+# input of the graph identity, and the string the hub stores as "what this image
+# said" — does not move under a corpus bump. Resolution happens at the CORPUS
+# CONSULTATION, which is where the stale fact actually is. Artifact CAS keys
+# carry no topology handle at all and are untouched.
+
+
+class ContractVersionAheadError(LayoutDeclarationError):
+    """A declared handle whose MAJOR is ahead of every version this build
+    vendors for that name: the WORKER is behind the declarer, not the reverse."""
+
+
+class ContractDescriptorUnprovenError(LayoutDeclarationError):
+    """The corpus document a superseded major would resolve ONTO does not agree
+    with the corpus's own digest ledger, so the substitution cannot be proven."""
+
+
+#: The corpus directory each resolvable axis is filed under. The LOADER-SHAPE
+#: topology vocabulary (`KNOWN_TOPOLOGY_CONTRACTS`) is deliberately absent: it
+#: is a hardcoded transcription, not a corpus, and tensorfs#153 did not move it.
+_CORPUS_DIR: dict[str, str] = {AXIS_TOPOLOGY: "topologies", AXIS_QUANT: "rules"}
+
+
+@functools.lru_cache(maxsize=4)
+def _corpus_digests(kind: str) -> Mapping[str, str]:
+    """``handle -> the digest the DOCUMENT itself carries``, for one kind."""
+    out: dict[str, str] = {}
+    for path in sorted((_SPEC_V2 / kind).glob("*.json")):
+        doc = json.loads(path.read_text(encoding="utf-8"))
+        out[f"{doc['name']}@{doc['version']}"] = str(doc.get("digest") or "")
+    return MappingProxyType(out)
+
+
+@functools.lru_cache(maxsize=1)
+def _ledger_digests() -> Mapping[str, Mapping[str, str]]:
+    """``kind -> handle -> digest``, from the corpus's own `vectors/digests.json`."""
+    raw = json.loads(
+        (_SPEC_V2 / "vectors" / "digests.json").read_text(encoding="utf-8"))
+    return MappingProxyType({
+        str(kind): MappingProxyType({str(h): str(d) for h, d in rows.items()})
+        for kind, rows in raw.items() if isinstance(rows, dict)
+    })
+
+
+def _corpus_members(axis: str) -> tuple[str, ...]:
+    if axis == AXIS_TOPOLOGY:
+        return known_topologies()
+    if axis == AXIS_QUANT:
+        return known_quant_rules()
+    raise LayoutDeclarationError(
+        f"unknown layout axis {axis!r}; the axes are {list(LAYOUT_AXES)}")
+
+
+def _split_handle(text: str) -> tuple[str, int] | None:
+    match = _HANDLE_RE.match(text)
+    if match is None:
+        return None
+    return f"{match.group(1)}.{match.group(2)}", int(match.group(3))
+
+
+def _prove_descriptor(handle: str, *, axis: str, declared: str, where: str) -> None:
+    """A superseded major may only resolve onto a document whose own digest
+    equals its row in the corpus's ledger.
+
+    Resolution is the ONE place this repo substitutes an identity the author did
+    not write, so the identity it substitutes has to be the ratified one — not
+    merely a file that happens to carry the right name. Two independently
+    written copies of that digest exist (the document's `digest` field and
+    `vectors/digests.json`); a document whose bytes moved under a name that did
+    not is exactly what must NOT resolve silently, because the resolved handle
+    would look identical in every log line while meaning something else.
+
+    The exact-match path deliberately does not pay this: an unchanged
+    declaration is already fenced byte-for-byte by `[packages.tensorfs.files]`.
+    """
+    kind = _CORPUS_DIR[axis]
+    stated = _corpus_digests(kind).get(handle, "")
+    pinned = _ledger_digests().get(kind, {}).get(handle, "")
+    if stated and pinned and stated == pinned:
+        return
+    raise ContractDescriptorUnprovenError(
+        f"{where}: {declared!r} names a version this corpus has superseded, and "
+        f"{handle!r} is what it would resolve to — but that document's own "
+        f"digest ({stated[:16] or '<absent>'}…) and the corpus ledger "
+        f"({pinned[:16] or '<absent>'}…) do not agree, so the substitution "
+        f"cannot be proven. Resolving anyway would silently serve a descriptor "
+        f"nobody ratified under a name the author recognises. Re-vendor per "
+        f"`_vendor/VENDORED.toml` rather than hand-editing spec/v2."
+    )
+
+
+def resolve_declared_handle(
+    handle: object, *, axis: str, where: str,
+) -> str | None:
+    """A declared handle -> the corpus handle that ANSWERS it, or ``None``.
+
+    ``None`` means the NAME is unknown at every version — an invented handle,
+    whose refusal belongs to the caller because each site names a different
+    remedy (a topology is EXTRACTED from banked headers; a rule is AUTHORED and
+    ratified). A major ahead of the corpus raises
+    :class:`ContractVersionAheadError`; a superseded major answers the newest
+    record the corpus carries for that name.
+    """
+    text = str(handle or "").strip()
+    members = _corpus_members(axis)
+    if text in members:
+        return text
+    split = _split_handle(text)
+    if split is None:
+        return None
+    name, major = split
+    carried = max(
+        (int(m.rpartition("@")[2]) for m in members
+         if m.rpartition("@")[0] == name),
+        default=0,
+    )
+    if carried == 0:
+        return None
+    if major > carried:
+        raise ContractVersionAheadError(
+            f"{where}: {text!r} declares major {major} and this worker vendors "
+            f"{name}@{carried} — the WORKER's corpus is behind the declarer. "
+            f"Reading a version it has never seen as the one it holds would "
+            f"decode plausible numbers rather than fail. Re-vendor tensorfs per "
+            f"`_vendor/VENDORED.toml`; do NOT downgrade the declaration."
+        )
+    resolved = f"{name}@{carried}"
+    _prove_descriptor(resolved, axis=axis, declared=text, where=where)
+    return resolved
+
+
+def declared_contract_key(handle: object, *, axis: str) -> str:
+    """The COMPARISON identity of a declared handle.
+
+    th#2301's `DeclaredContractKey`, worker-side and for the same reason: two
+    handles that name the same ratified document must compare EQUAL even when
+    they are spelled at different majors, or the fleet's `@1` decode set stops
+    intersecting a catalog the hub's resweep has already moved to `@2` — and
+    the failure lands on a rented pod at load time, as `decode_set_rule_
+    undeclared`, for a tree the image can read perfectly well.
+
+    The digest is the identity. A handle that does NOT resolve compares as its
+    own literal spelling, exactly as a string equality did, so nothing that
+    worked before can stop working.
+    """
+    text = str(handle or "").strip()
+    try:
+        resolved = resolve_declared_handle(
+            text, axis=axis, where="declared_contract_key")
+    except LayoutDeclarationError:
+        return text
+    if resolved is None:
+        return text
+    return _corpus_digests(_CORPUS_DIR[axis]).get(resolved, "") or resolved
+
+
+def resolved_display_name(layout: "LayoutId") -> str:
+    """The operator-facing v1 spelling for a stamp pair, THROUGH resolution.
+
+    The display table is re-keyed by every corpus bump, so a class that still
+    declares `sdxl.diffusers@1` would otherwise lose its display name the moment
+    the corpus moved to `@2` — the refusal an operator reads would stop naming
+    the lane they declared last week, which is the whole reason the table
+    exists. It gates nothing; it is prose.
+    """
+    names = display_names()
+    rendered = layout.render()
+    if rendered in names:
+        return names[rendered]
+    try:
+        topology = resolve_declared_handle(
+            layout.topology, axis=AXIS_TOPOLOGY, where="display-names")
+        quant = resolve_declared_handle(
+            layout.quant, axis=AXIS_QUANT, where="display-names")
+    except LayoutDeclarationError:
+        return ""
+    if not topology or not quant:
+        return ""
+    return names.get(f"{topology}+{quant}", "")
+
+
 def known_contracts(axis: str) -> tuple[str, ...]:
     """The handles of ONE axis. Unknown axis is a refusal, not an empty tuple —
     an empty answer would read as "nothing is registered".
@@ -481,7 +694,15 @@ def validate_layout_handle(
         raise LayoutDeclarationError(
             f"{where}: {text!r} is not a contract handle (want ns.name@N)"
         )
-    if text not in known:
+    # The QUANT axis is the vendored CORPUS, so a superseded major resolves;
+    # the topology axis here is the hardcoded LOADER-SHAPE list, which no corpus
+    # bump moves, so it stays a literal membership test.
+    present = (
+        resolve_declared_handle(text, axis=AXIS_QUANT, where=where) is not None
+        if axis == AXIS_QUANT
+        else text in known
+    )
+    if not present:
         if axis == AXIS_QUANT:
             raise LayoutDeclarationError(
                 f"{where}: quant rule {text!r} is not in the vendored v2 "
@@ -607,7 +828,12 @@ def _axis_member(text: str, *, axis: str, where: str) -> str | None:
     if not _HANDLE_RE.match(value):
         raise LayoutDeclarationError(
             f"{where}: {value!r} is not a contract handle (want ns.name@N)")
-    if value not in known_contracts(axis):
+    present = (
+        resolve_declared_handle(value, axis=AXIS_QUANT, where=where) is not None
+        if axis == AXIS_QUANT
+        else value in known_contracts(axis)
+    )
+    if not present:
         raise LayoutDeclarationError(
             f"{where}: {axis} contract {value!r} is not registered. "
             "Contracts are CODE (th#1580 A2): register it in tensorhub's "
@@ -692,8 +918,14 @@ def _stamp_half(value: object, *, axis: str, where: str) -> str:
     if not _HANDLE_RE.match(text):
         raise LayoutDeclarationError(
             f"{where}: {text!r} is not a handle (want ns.name@N)")
-    known = known_topologies() if axis == AXIS_TOPOLOGY else known_quant_rules()
-    if text not in known:
+    known = _corpus_members(axis)
+    # THE CHOKE POINT the whole fleet's lane declarations pass through, and
+    # therefore the one `lock --check` and `__init_subclass__` inherit for free:
+    # `resolve_declared_handle` answers a SUPERSEDED major by name, refuses a
+    # major AHEAD of this corpus with its own type, and answers None only when
+    # the NAME is unknown at every version — which is the refusal below.
+    # The DECLARED spelling is what this returns; nothing is rewritten.
+    if resolve_declared_handle(text, axis=axis, where=where) is None:
         extra = ""
         if axis == AXIS_TOPOLOGY:
             extra = (

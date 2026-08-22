@@ -302,8 +302,8 @@ def _parse_lanes(
     from ..models.tensor_layout_contract import (
         LayoutDeclarationError,
         capability_floor_for_rule,
-        display_names,
         parse_lane_stamp,
+        resolved_display_name,
         rule_dtype,
     )
 
@@ -326,7 +326,6 @@ def _parse_lanes(
             f"— that is the entire eager declaration."
         )
 
-    display = display_names()
     declared: list[DeclaredLane] = []
     seen: set[str] = set()
     for key, spec in lanes.items():
@@ -382,7 +381,7 @@ def _parse_lanes(
                 # and never the author. Two producers of one fact is how they
                 # drift apart.
                 min_sm=floor,
-                display_name=display.get(handle, ""),
+                display_name=resolved_display_name(layout),
                 spec=spec,
             )
         )

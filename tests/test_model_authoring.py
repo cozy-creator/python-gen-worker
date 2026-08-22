@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import logging
 import threading
 from pathlib import Path
@@ -190,8 +191,22 @@ def test_model_header_declarations_and_refusals() -> None:
         class StringLane(Model[SDXL], lanes={"sdxl.diffusers-bf16@1": _lane()}):
             pass
 
+    # pgw#1665: the PAIR is read out of the corpus rather than pinned. The hint
+    # is prose generated from `display-names.json`, and tensorfs#153 moved
+    # `sdxl.diffusers` to `@2` — pinning `@1` here asserted the corpus's version
+    # while claiming to assert that the hint points somewhere. What must hold is
+    # that the old v1 spelling still RESOLVES TO NOTHING as a lane key and gets
+    # named the real pair; which major that pair carries is the corpus's business.
+    from gen_worker.models.tensor_layout_contract import display_names
+
+    (sdxl_pair,) = [
+        pair for pair, name in display_names().items()
+        if name == "sdxl.diffusers-bf16@1"
+    ]
+    assert sdxl_pair.endswith("+plain.bf16@1") and sdxl_pair.startswith("sdxl.diffusers@")
+
     with pytest.raises(ModelDeclarationError,
-                       match="used to name 'sdxl.diffusers@1\\+plain.bf16@1'"):
+                       match=f"used to name '{re.escape(sdxl_pair)}'"):
         class OldSpelling(Model[SDXL], lanes={"sdxl.diffusers-bf16@1": _lane()}):
             pass
 

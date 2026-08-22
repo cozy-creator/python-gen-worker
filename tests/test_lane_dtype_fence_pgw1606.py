@@ -201,7 +201,15 @@ def test_the_two_cozy_fp8_rules_do_NOT_share_a_lane_body() -> None:
     on. The dtype names the ELEMENT; the rule names the EXECUTOR, and only one
     of those is what a lane body is.
     """
+    # THE DECLARED spelling, which is what the fleet writes and what every
+    # released image carries. tensorfs#153 moved this rule @1 -> @2 in place, so
+    # keeping `@1` here is deliberate (pgw#1665): these `rule_body` reads are
+    # the production question, and answering them needs resolution.
     storage, rowwise = "cozy.fp8-storage@1", "cozy.fp8-rowwise@1"
+    #: ...and the CORPUS spelling, for the direct document reads below. Two
+    #: names for one rule is exactly the state resolution exists to bridge, and
+    #: the bridge is only visible if both are written down.
+    rowwise_doc = "cozy.fp8-rowwise@2"
 
     # The premise: one dtype, two rules. If this ever stops being true the
     # test below is proving nothing, so it is asserted rather than assumed.
@@ -231,7 +239,11 @@ def test_the_two_cozy_fp8_rules_do_NOT_share_a_lane_body() -> None:
     rules = quant_rules()
     assert rules[storage].conventions["scale"] == "none"
     assert "cast to bf16" in rules[storage].conventions["consumption"]
-    assert rules[rowwise].conventions["scale"] == "per_channel_out"
+    assert rules[rowwise_doc].conventions["scale"] == "per_channel_out"
+    assert rowwise not in rules, (
+        f"{rowwise} is a corpus member again — then this arm is no longer "
+        f"exercising resolution and `rowwise_doc` should collapse back into it"
+    )
 
     # The baseline body is what decides a lane needs no kernel gate, so the
     # storage lane must actually LAND there rather than merely be spelled it.

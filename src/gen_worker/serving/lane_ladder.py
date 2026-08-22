@@ -192,7 +192,7 @@ _RULE_BODY: dict[str, str] = {
     "plain.f16@1": el.WEIGHTS_BF16 + "-" + el.ACT_W16A16,
     "plain.bf16@1": el.WEIGHTS_BF16 + "-" + el.ACT_W16A16,
     "cozy.fp8-storage@1": el.WEIGHTS_BF16 + "-" + el.ACT_W16A16,
-    "cozy.fp8-rowwise@1": el.WEIGHTS_FP8 + "-" + el.ACT_W8A8 + "-" + el.SCALE_DYNAMIC,
+    "cozy.fp8-rowwise@2": el.WEIGHTS_FP8 + "-" + el.ACT_W8A8 + "-" + el.SCALE_DYNAMIC,
     "hf.fp8-blockwise@1": el.WEIGHTS_FP8 + "-" + el.ACT_W8A8 + "-" + el.SCALE_DYNAMIC,
     "cozy.nvfp4-flat@1": el.WEIGHTS_NVFP4 + "-" + el.ACT_W4A4 + "-" + el.SCALE_STATIC,
     "bfl.nvfp4-preswizzled@1": el.WEIGHTS_NVFP4 + "-" + el.ACT_W4A4 + "-" + el.SCALE_STATIC,
@@ -210,8 +210,30 @@ def rule_body(quant: Any) -> str:
     there are eight rules, they are enumerated above, and
     `test_every_ratified_rule_has_a_serving_body` fails the moment tensorfs
     ratifies a ninth.
+
+    **The table is keyed by the CORPUS, the argument is a DECLARATION** (pgw#1665).
+    tensorfs#153 moved `cozy.fp8-rowwise` @1 -> @2 in place, and every released
+    image still declares `@1` — so keying the table at `@2` and looking up
+    literally would answer `""` for the fp8 lane and pass it over as
+    `unknown_quant_rule` on every pod. That failure is SILENT in the worst way:
+    the ladder falls back to bf16 and serves, so the only symptom is a slower
+    lane. The declared handle resolves before the lookup; a handle AHEAD of this
+    corpus resolves to nothing and takes the named rejection, because a boot is
+    not the place to raise about a re-vendor.
     """
-    return _RULE_BODY.get(str(quant or "").strip(), "")
+    from ..models.tensor_layout_contract import (
+        AXIS_QUANT,
+        LayoutDeclarationError,
+        resolve_declared_handle,
+    )
+
+    handle = str(quant or "").strip()
+    try:
+        resolved = resolve_declared_handle(handle, axis=AXIS_QUANT,
+                                           where="rule_body")
+    except LayoutDeclarationError:
+        resolved = None
+    return _RULE_BODY.get(resolved or handle, "")
 
 
 def _rank(body: str) -> int:
