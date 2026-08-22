@@ -28,8 +28,7 @@ import inspect
 import logging
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from pathlib import Path
-from types import MappingProxyType
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 from .._vendor.torchcg.adopt import Dispatcher as _TCGDispatcher
 from .._vendor.torchcg.adopt import Record as _TCGRecord

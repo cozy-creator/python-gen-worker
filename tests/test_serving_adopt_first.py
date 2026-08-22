@@ -10,7 +10,7 @@ import torch
 
 from gen_worker import boot_stages
 from gen_worker._vendor.tensorfs import LocalCAS
-from gen_worker._vendor.torchcg import EnvironmentMismatch
+from gen_worker.graphs.requirements import EnvironmentMismatch
 from gen_worker.graphs.discovery import discover_lane
 from gen_worker.graphs.document import GraphRecord, GraphSetDocument
 from gen_worker.graphs.env import ArtifactEnv as EnvIdentity

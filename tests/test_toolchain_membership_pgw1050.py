@@ -40,27 +40,39 @@ def _bumped(component: str) -> Dict[str, str]:
 
 
 def _key(block: Dict[str, str]) -> str:
-    return str(exported_compiled_graph_meta(toolchain=block)["compiled_graph_key"])
+    return str(exported_compiled_graph_meta(toolchain=block)["key"])
 
 
 @pytest.mark.parametrize("library", MODEL_LIBRARIES)
-def test_a_model_library_bump_does_not_rekey(library: str) -> None:
-    """Two compiled graphs identical in graph x envelope x sm, differing ONLY in a model library's content, are ONE compiled graph and must carry ONE key."""
-    assert _key(_bumped(library)) == _key(dict(TOOLCHAIN))
+def test_the_env_block_keys_WHATEVER_IT_IS_GIVEN(library: str) -> None:
+    """tcg#90 moved WHERE membership is decided, and this test says where.
+
+    torchcg used to carry a `_NOT_TOOLCHAIN` deny-list and evict diffusers /
+    transformers / peft from the axis itself. That was a SECOND producer of the
+    membership rule, disagreeing with `require_stack`'s allow-list one level
+    away, and it is gone: the env block's members are the caller's to choose and
+    torchcg keys exactly what it is handed.
+
+    So a model library reaching the block DOES split the key. That is not a
+    regression — it is the responsibility being unambiguous. The rule now lives
+    in exactly one place, `gen_worker.toolchain.toolchain_digest`, and the test
+    below proves it never emits one.
+    """
+
+    assert _key(_bumped(library)) != _key(dict(TOOLCHAIN))
 
 
 @pytest.mark.parametrize("library", MODEL_LIBRARIES)
-def test_the_axis_ignores_the_library_even_when_a_graph_records_it(
-    library: str,
-) -> None:
-    """Membership is a property of the AXIS, not of whichever producer wrote the block: a recorded block that carries the component digests the same as one that does not."""
-    without = {k: v for k, v in TOOLCHAIN.items() if k not in MODEL_LIBRARIES}
-    with_one = dict(without)
-    with_one[library] = TOOLCHAIN[library]
-    assert (tcg_identity.toolchain_axis_digest(with_one)
-            == tcg_identity.toolchain_axis_digest(without))
-    assert (tcg_identity.toolchain_axis_digest({library: TOOLCHAIN[library]})
-            == tcg_identity.toolchain_axis_digest({}))
+def test_the_compile_stack_SELECTOR_drops_the_library(library: str) -> None:
+    """The surviving torchcg-side statement of membership, and it is an
+    ALLOW-list: `compile_stack` selects torch/triton/nvidia-* out of a lockfile
+    and a model library is simply not selected."""
+
+    from gen_worker._vendor.torchcg.identity import compile_stack
+
+    selected = compile_stack({"torch": "2.13.0", library: "9.9.9"})
+    assert library not in selected
+    assert selected == {"torch": "2.13.0"}
 
 
 @pytest.mark.parametrize("component", COMPILER_COMPONENTS)
@@ -100,13 +112,20 @@ def test_the_producer_does_not_collect_the_model_libraries(
 
 
 def test_producer_and_reader_agree_on_membership() -> None:
-    """One axis, one membership: everything the producer collects REACHES the axis, and nothing it collects is dropped on the way in."""
+    """One axis, one membership: everything the producer collects REACHES the key.
+
+    Under tcg#90 the reader drops NOTHING — the env block is digested whole —
+    so this is now the strong direction of the same property, and the eviction
+    it used to skip past (`MODEL_LIBRARIES`) is asserted at the producer in
+    `test_the_producer_does_not_collect_the_model_libraries`.
+    """
     collected = dict(cc.toolchain_digest())
     assert collected, "the producer must collect something to prove anything"
-    full = tcg_identity.toolchain_axis_digest(collected)
+    assert "torch" in collected, "the producer must name the compiler"
+    full = _key(collected)
     for component in collected:
-        if component in MODEL_LIBRARIES:
-            continue
         without = {k: v for k, v in collected.items() if k != component}
-        assert tcg_identity.toolchain_axis_digest(without) != full, component
+        if "torch" not in without:
+            continue  # torch's absence is a refusal, tested elsewhere
+        assert _key(without) != full, component
 

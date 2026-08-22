@@ -487,7 +487,7 @@ def test_published_bytes_are_the_envelope_and_materialize(
 def test_a_legacy_bare_package_position_is_named_and_then_replaced(
     endpoint: Path, tmp_path: Path
 ) -> None:
-    from gen_worker._vendor.torchcg import RequirementsManifest
+    from gen_worker.graphs.requirements import RequirementsManifest
 
     cas = tmp_path / "graph-cas"
     store = LocalGraphStore(LocalCAS(cas))

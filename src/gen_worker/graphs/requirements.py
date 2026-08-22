@@ -23,7 +23,6 @@ from dataclasses import dataclass
 from typing import Any
 
 from .._vendor.torchcg.identity import is_graph_hash
-from .._vendor.torchcg.refuse import IdentityError
 from .env import ArtifactEnv, EnvError, require_env
 
 _MANIFEST_FIELDS = frozenset(
