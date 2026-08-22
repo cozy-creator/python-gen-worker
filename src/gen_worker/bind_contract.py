@@ -39,7 +39,9 @@ class BindIdentity:
 class BindContract:
     digest: str
     identity: BindIdentity
+    release_contract_digest: str
     census: Census
+    graphs: tuple[Mapping[str, Any], ...]
 
 
 def _sha256(ref: str) -> str:
@@ -91,6 +93,10 @@ def decode(raw: bytes, *, digest: str) -> BindContract:
             f"bind contract {digest} identity lacks release_id, "
             "derive_image_digest, or config_digest"
         )
+    release_contract_digest = str(
+        document.get("release_contract_digest") or ""
+    ).strip()
+    _sha256(release_contract_digest)
     census_row = document.get("construction_census")
     if not isinstance(census_row, dict):
         raise BindContractError(
@@ -103,10 +109,35 @@ def decode(raw: bytes, *, digest: str) -> BindContract:
             f"bind contract {digest} carries an unreadable construction "
             f"census: {type(exc).__name__}: {exc}"
         ) from exc
+    graph_rows = document.get("graphs")
+    if not isinstance(graph_rows, list):
+        raise BindContractError(f"bind contract {digest} has no graphs array")
+    graphs: list[Mapping[str, Any]] = []
+    seen_graphs: set[tuple[str, str]] = set()
+    for index, row in enumerate(graph_rows):
+        if not isinstance(row, dict):
+            raise BindContractError(
+                f"bind contract {digest} graphs[{index}] is not an object"
+            )
+        lane = str(row.get("lane") or "").strip()
+        graph = str(row.get("graph_hash") or "").strip()
+        if not lane or not graph:
+            raise BindContractError(
+                f"bind contract {digest} graphs[{index}] lacks lane or graph_hash"
+            )
+        key = (lane, graph)
+        if key in seen_graphs:
+            raise BindContractError(
+                f"bind contract {digest} repeats graph {graph!r} in lane {lane!r}"
+            )
+        seen_graphs.add(key)
+        graphs.append(dict(row))
     return BindContract(
         digest=digest,
         identity=BindIdentity(release_id, image, config),
+        release_contract_digest=release_contract_digest,
         census=census,
+        graphs=tuple(graphs),
     )
 
 
@@ -114,14 +145,20 @@ def fetch(
     digest: str,
     url: str,
     *,
+    token: Optional[str] = None,
     opener: Callable[..., Any] = urllib.request.urlopen,
 ) -> BindContract:
     _sha256(digest)
     if not str(url or "").strip():
         raise BindContractError(f"bind contract {digest} has no fetch URL")
-    request = urllib.request.Request(
-        str(url), headers={"Accept-Encoding": "identity"}, method="GET"
-    )
+    bearer = str(token if token is not None else worker_credential.current() or "").strip()
+    if not bearer:
+        raise BindContractError(
+            f"bind contract {digest} fetch has no worker credential"
+        )
+    request = urllib.request.Request(str(url), method="GET")
+    request.add_header("Accept-Encoding", "identity")
+    request.add_header("Authorization", f"Bearer {bearer}")
     try:
         with opener(request, timeout=60.0) as response:
             raw = response.read(MAX_BIND_CONTRACT_BYTES + 1)

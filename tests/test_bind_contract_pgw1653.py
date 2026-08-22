@@ -22,6 +22,7 @@ def _document() -> tuple[str, bytes]:
                 "derive_image_digest": "sha256:image",
                 "config_digest": "sha256:config",
             },
+            "release_contract_digest": "sha256:" + "1" * 64,
             "construction_census": {
                 "v": 1,
                 "kind": "gen-worker.construction-census@1",
@@ -37,7 +38,7 @@ def _document() -> tuple[str, bytes]:
             },
             "env_compile_stack": [],
             "lanes": [{"stamp": "tiny@1"}],
-            "graphs": [],
+            "graphs": [{"lane": "tiny@1", "graph_hash": "cg-graph-v1-test"}],
         },
         sort_keys=True,
         separators=(",", ":"),
@@ -60,13 +61,33 @@ def test_fetch_verifies_the_CAS_address_before_decoding() -> None:
         def read(self, _limit: int) -> bytes:
             return raw
 
-    got = bind_contract.fetch(digest, "https://objects.test/bind", opener=lambda *_a, **_k: Response())
+    requests: list[Any] = []
+
+    def open_request(request: Any, **_kwargs: Any) -> Response:
+        requests.append(request)
+        return Response()
+
+    got = bind_contract.fetch(
+        digest, "https://objects.test/bind", token="worker-jwt", opener=open_request
+    )
     assert got.identity.config_digest == "sha256:config"
+    assert got.release_contract_digest == "sha256:" + "1" * 64
     assert got.census.pipeline_class == "TinyPipeline"
+    assert got.graphs[0]["graph_hash"] == "cg-graph-v1-test"
+    assert requests[0].get_header("Authorization") == "Bearer worker-jwt"
 
     wrong = "sha256:" + ("0" * 64)
     with pytest.raises(bind_contract.BindContractError, match="fetched bytes hashing"):
-        bind_contract.fetch(wrong, "https://objects.test/bind", opener=lambda *_a, **_k: Response())
+        bind_contract.fetch(
+            wrong, "https://objects.test/bind", token="worker-jwt",
+            opener=lambda *_a, **_k: Response(),
+        )
+
+
+def test_fetch_refuses_an_absent_worker_credential() -> None:
+    digest, _raw = _document()
+    with pytest.raises(bind_contract.BindContractError, match="no worker credential"):
+        bind_contract.fetch(digest, "https://hub.test/bind", token="")
 
 
 def test_mismatch_report_is_attributed_to_the_bind_not_the_pod() -> None:
