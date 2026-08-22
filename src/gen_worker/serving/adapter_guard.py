@@ -159,17 +159,26 @@ def rearm_constants(module: Any) -> int:
     dispatcher = dispatcher_of(module)
     if dispatcher is None:
         return 0
+    from .._vendor.torchcg.adopt import rebind
+    from .._vendor.torchcg.refuse import AdoptError
+
     rearmed = 0
     for _record, call in tuple(getattr(dispatcher, "_entries", ()) or ()):
-        runner = getattr(call, "runner", None)
-        package = getattr(runner, "_package", None)
-        values = getattr(runner, "_bound_values", None)
-        if package is None or not values:
+        # tcg#90: torchcg owns the re-install now. This used to reach through a
+        # private `runner._package` / `runner._bound_values` pair, and
+        # `test_lora_fold` carried a fence saying to ask for a public
+        # `rebind()` instead — which is what this is. `rebind` also RE-RESOLVES
+        # from the live module rather than re-installing the table it held: a
+        # fold REPLACES a tensor, so the old pointers aim at storage the module
+        # no longer uses.
+        try:
+            rebind(call, module)
+        except AdoptError as exc:
             raise ConstantRearmUnsupported(
-                f"the compiled runner armed on {type(module).__name__} exposes "
-                f"no bound constant table to re-install after a weight "
-                f"mutation; a folded constant would serve stale weights")
-        package.load_constants(values, check_full_update=True, user_managed=True)
+                f"the compiled graph armed on {type(module).__name__} cannot "
+                f"re-install its constant table after a weight mutation "
+                f"({exc}); a folded constant would serve stale weights"
+            ) from exc
         rearmed += 1
     return rearmed
 

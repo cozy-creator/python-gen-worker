@@ -415,13 +415,67 @@ def load(artifact: StoredArtifact, module: Any, *, key: str | None = None) -> An
             f"artifact declares {len(missing)} constant(s) nothing resolves: "
             f"{missing[:6]!r}"
         )
+    _install(package, values)
+    # What `rebind` needs to re-resolve after a weight write: which fqns come
+    # from the LIVE module (those move) and which the trace baked (those do
+    # not). Kept on the package because the package is what a caller holds.
+    package._torchcg_state_fqns = tuple(sorted(declared & state_named))
+    package._torchcg_literals = literals
+    return package
+
+
+def _install(package: Any, values: Mapping[str, Any]) -> None:
     try:
-        package.load_constants(values, check_full_update=True, user_managed=True)
+        package.load_constants(
+            dict(values), check_full_update=True, user_managed=True
+        )
     except Exception as exc:
         raise AdoptError(f"constant binding failed: {type(exc).__name__}: {exc}") from exc
     # The user-managed pointers must not outlive their Python owners.
-    package._torchcg_retained = values
-    return package
+    package._torchcg_retained = dict(values)
+
+
+def rebind(package: Any, module: Any) -> int:
+    """Re-install the constant table after the module's WEIGHTS were rewritten.
+
+    Constants bind `user_managed=True`, which means the compiled artifact holds
+    raw POINTERS into the live module's tensors. Anything that replaces a
+    tensor rather than writing through it -- folding a LoRA is the case that
+    matters -- leaves those pointers aimed at storage the module no longer
+    uses, and the graph then serves stale weights with nothing raising.
+
+    So this re-resolves the state-dict half from the module as it is NOW and
+    re-installs. The trace-baked literals are not re-read: they were never the
+    module's to change.
+
+    Public on purpose. pgw's `adapter_guard.rearm_constants` used to reach
+    through a private `runner._package` / `runner._bound_values` pair and had a
+    fence saying "give torchcg a public rebind() and call that instead". This
+    is that.
+    """
+
+    retained = getattr(package, "_torchcg_retained", None)
+    if retained is None:
+        raise AdoptError(
+            "this package was not loaded by torchcg.adopt, so it states no "
+            "constant table to re-install"
+        )
+    state = resident_constants(module)
+    values = dict(getattr(package, "_torchcg_literals", None) or {})
+    missing: list[str] = []
+    for fqn in getattr(package, "_torchcg_state_fqns", ()) or ():
+        value = state.get(fqn)
+        if value is None:
+            missing.append(fqn)
+        else:
+            values[fqn] = value
+    if missing:
+        raise AdoptError(
+            f"the live module no longer holds {len(missing)} constant(s) the "
+            f"artifact declares: {missing[:6]!r}"
+        )
+    _install(package, values)
+    return len(values)
 
 
 def adopt(module: Any, artifacts: Sequence[tuple[StoredArtifact, Any]]) -> Dispatcher:
@@ -455,5 +509,6 @@ __all__ = [
     "load",
     "module_device",
     "release",
+    "rebind",
     "resident_constants",
 ]
