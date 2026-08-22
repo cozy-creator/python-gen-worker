@@ -141,6 +141,12 @@ def _engine_marks(ctx: Any) -> None:
     ctx.compile(object())
 
 
+def _engine_marks_with(mark: Any) -> None:
+    """se#827's shape: the component that OWNS the partition applies the mark."""
+
+    mark(object())
+
+
 def _lane() -> Any:
 
     return lane(request=const(GiB(1)))
@@ -316,16 +322,52 @@ def test_model_header_declarations_and_refusals() -> None:
 
     assert model_shapes(DynamicAspect) == {"aspect": DYNAMIC}
 
+    # pgw#1655. A mark HANDED ON is a mark: the component that owns the
+    # partition applies it (se#827), and the declaration stays readable
+    # because `ctx.compile` is still NAMED in `load()`. This assertion was
+    # `is False` until pgw#1655, and that False is what refused minimax-h3.
     class DelegatedMark(
         Model[SDXL],
         lanes={_sdxl_contract(): _lane()},
         shapes={"aspect": STATIC},
     ):
         def load(self, ctx: object) -> None:
-            _engine_marks(ctx)
+            _engine_marks_with(ctx.compile)  # type: ignore[attr-defined]
 
-    assert model_marks_compile(DelegatedMark) is False
+    assert model_marks_compile(DelegatedMark) is True
     assert model_shapes(DelegatedMark) == {"aspect": STATIC}
+
+    # A delegated mark also carries the `shapes=` requirement with it — the
+    # same one fact, asked by the other consumer.
+    with pytest.raises(LaneDeclarationError, match="shapes= is REQUIRED"):
+        class DelegatedNoShapes(Model[SDXL], lanes={_sdxl_contract(): _lane()}):
+            def load(self, ctx: object) -> None:
+                _engine_marks_with(ctx.compile)  # type: ignore[attr-defined]
+
+    # Handing the CONTEXT away is the one thing the reader cannot follow, and
+    # it is STATED here rather than answered "does not compile" at the gate.
+    with pytest.raises(ModelDeclarationError, match="hands the LOAD CONTEXT"):
+        class HiddenMark(
+            Model[SDXL],
+            lanes={_sdxl_contract(): _lane()},
+            shapes={"aspect": STATIC},
+        ):
+            def load(self, ctx: object) -> None:
+                _engine_marks(ctx)
+
+    # The refusal names the LINE, not just the class.
+    with pytest.raises(ModelDeclarationError, match="_engine_marks\\(ctx\\)"):
+        class HiddenMarkAgain(Model[SDXL], lanes={_sdxl_contract(): _lane()}):
+            def load(self, ctx: object) -> None:
+                _engine_marks(ctx)
+
+    # An eager class that never names `ctx` at all stays readable and unmarked
+    # — the absent mark IS the declaration, and it needs no keyword.
+    class EagerReadable(Model[SDXL], lanes={_sdxl_contract(): _lane()}):
+        def load(self, ctx: object) -> None:
+            self.pipe = object()
+
+    assert model_marks_compile(EagerReadable) is False
 
     with pytest.raises(LaneDeclarationError, match="at least TWO variant"):
         class OneVariant(

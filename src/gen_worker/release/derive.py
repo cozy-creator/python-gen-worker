@@ -377,6 +377,15 @@ def _subject_classes(module: ModuleType) -> tuple[type, ...]:
     read off the MARK (pgw#1597/#1599: "compilation participation is the
     MARK"), so with no mark anywhere there is nothing to distinguish a release
     subject from an auxiliary model another slot drives.
+
+    That refusal is only sound because the mark is read TOTALLY (pgw#1655).
+    ``model_marks_compile`` used to answer ``False`` for "does not compile"
+    and for "cannot see it" alike, so a DELEGATED mark
+    (``engine.compile_dit(ctx.compile)``) read as auxiliary — minimax-h3 fell
+    into the refusal below while both its lanes declared correctly, and
+    wan-2.2's two MoE classes were dropped from the subject set without a
+    word. An unreadable mark is now a refusal at the class DECLARATION, so
+    every class that reaches this gate has an answer that was stated.
     """
 
     marked, unmarked = _module_model_classes(module)
@@ -388,8 +397,12 @@ def _subject_classes(module: ModuleType) -> tuple[type, ...]:
             f"({[cls.__name__ for cls in unmarked]!r}) and NONE of them marks "
             f"a compile target, so which one the release is ABOUT cannot be "
             f"read. A release derives every COMPILE-MARKING class (pgw#1650), "
-            f"and there are none here. Mark each compiled one via "
-            f"`ctx.compile()` in its `load()`; an auxiliary model that another "
+            f"and there are none here. The mark is read TOTALLY (pgw#1655) — "
+            f"a mark HANDED ON, `engine.compile_dit(ctx.compile)`, counts as "
+            f"much as one called in place, and a `load()` that hides the "
+            f"context is refused at its own declaration — so this is a real "
+            f"absence, not an unreadable one. Mark each compiled class via "
+            f"`ctx.compile` in its `load()`; an auxiliary model that another "
             f"slot drives marks nothing and is then unambiguous."
         )
     return tuple(unmarked)

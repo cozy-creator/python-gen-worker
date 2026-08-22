@@ -157,6 +157,50 @@ def test_two_classes_and_no_compile_mark_still_refuses(
     assert not out.exists()
 
 
+def test_a_delegated_mark_is_a_mark_and_names_its_class_the_subject(
+    primary_tree: Path, tmp_path: Path
+) -> None:
+    """pgw#1655 — minimax-h3's shape: two classes, one DELEGATED mark.
+
+    RED ARM: before pgw#1655 this derive died in
+    `test_two_classes_and_no_compile_mark_still_refuses`'s refusal, because
+    `engine.compile_dit(ctx.compile)` was invisible to the reader pgw#1650
+    gates on. h3 was refused with 14 real graphs already in its committed lock.
+    """
+
+    out = tmp_path / "release.json"
+    assert _derive("delegated_mark_endpoint", primary_tree, out) == 0
+    document = json.loads(out.read_bytes())
+
+    # The delegated mark makes ONE class the subject, and the auxiliary class
+    # another slot drives is not one — exactly as a literal mark would.
+    assert [row["class"] for row in document["classes"]] == ["EngineDrivenModel"]
+    assert document["endpoint"].endswith(":EngineDrivenModel")
+
+    (lane,) = document["graphs"]["lanes"]
+    assert lane["contract"] == LANE
+    assert {record["target"] for record in lane["graphs"]} == {"unet"}
+    assert lane["unobserved_targets"] == []
+
+
+def test_a_mark_the_reader_cannot_follow_is_refused_at_the_declaration(
+    primary_tree: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """pgw#1655 — wan-2.2's shape: `load()` hands the CONTEXT away.
+
+    Not answerable without executing author code, so it is STATED where the
+    author can fix it instead of being reported as "does not compile" at the
+    gate. The refusal names the line.
+    """
+
+    out = tmp_path / "release.json"
+    assert _derive("hidden_mark_endpoint", primary_tree, out) == 1
+    stderr = capsys.readouterr().err
+    assert "hands the LOAD CONTEXT" in stderr
+    assert "_mark_moe_targets(ctx, self.pipe)" in stderr
+    assert not out.exists()
+
+
 def test_a_checkpoint_tree_nothing_loads_from_is_a_typo(
     primary_tree: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
