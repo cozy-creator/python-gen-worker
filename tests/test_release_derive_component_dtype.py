@@ -50,6 +50,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from collections.abc import Mapping
 from typing import Any
 
 import pytest
@@ -149,22 +150,40 @@ def test_a_v2_topology_declares_its_components_so_pgw1512_cannot_recur() -> None
     what makes the dtype policy below correct: the components are named, and
     one layout really does govern several of them.
     """
-    from gen_worker.models.tensor_layout_contract import topologies
+    from gen_worker.models.tensor_layout_contract import (
+        AXIS_TOPOLOGY,
+        resolve_declared_handle,
+        topologies,
+    )
 
-    corpus = topologies()
+    raw = topologies()
 
-    # sd15: ONE component, the denoiser, addressed by its own parameter names.
-    # No `unet.` prefix anywhere in the keys — the component is the KEY of the
-    # map, which is exactly the distinction pgw#1512 could not draw.
-    (sd15_component,) = corpus["sd15.diffusers@1"]
-    assert sd15_component == "unet"
-    sd15_keys = corpus["sd15.diffusers@1"]["unet"]
+    # pgw#1665: read the corpus THROUGH resolution. The handles named below are
+    # the ones an AUTHOR declares, and tensorfs#153 moved `sd15.diffusers` and
+    # `sdxl.diffusers` to `@2` in place — so a literal `raw["sd15.diffusers@1"]`
+    # is a `KeyError` the moment the corpus moves, for a document that is right
+    # there. What this test is about is the document's SHAPE, not its version.
+    def corpus(handle: str) -> Mapping[str, Mapping[str, tuple[int, ...]]]:
+        resolved = resolve_declared_handle(
+            handle, axis=AXIS_TOPOLOGY, where="pgw#1512 arm")
+        assert resolved is not None, f"{handle} names no vendored topology"
+        return raw[resolved]
+
+    # sd15: the DENOISER is addressed by its OWN parameter names, under a
+    # component that is the KEY of the map — which is exactly the distinction
+    # pgw#1512 could not draw. (tensorfs#153 widened this record from the UNet
+    # alone to the whole published tree, so the cardinality is no longer 1; the
+    # property being asserted was never the cardinality, and asserting the
+    # component SET instead says what actually holds.)
+    sd15 = corpus("sd15.diffusers@1")
+    assert set(sd15) == {"unet", "vae", "text_encoder", "safety_checker"}
+    sd15_keys = sd15["unet"]
     assert "conv_in.weight" in sd15_keys
     assert not [k for k in sd15_keys if k.startswith("unet.")]
 
     # sdxl: FOUR components under ONE layout — the fact that falsified
     # pgw#1512's premise, now readable instead of inferred from a pattern list.
-    sdxl = corpus["sdxl.diffusers@1"]
+    sdxl = corpus("sdxl.diffusers@1")
     assert set(sdxl) == {"unet", "vae", "text_encoder", "text_encoder_2"}
     assert "conv_in.weight" in sdxl["unet"], "the denoiser's own parameters"
     assert "decoder.conv_in.weight" in sdxl["vae"], "the VAE's"
@@ -176,15 +195,15 @@ def test_a_v2_topology_declares_its_components_so_pgw1512_cannot_recur() -> None
     # musicgen: the SINGLE-FILE shape that needed a v1 exemption. It is one
     # component with no name, and its keys carry the submodule prefixes that
     # used to look like component words. No exemption; nothing to exempt.
-    (musicgen_component,) = corpus["musicgen.transformers@1"]
+    (musicgen_component,) = corpus("musicgen.transformers@1")
     assert musicgen_component == ""
-    assert [k for k in corpus["musicgen.transformers@1"][""]
+    assert [k for k in corpus("musicgen.transformers@1")[""]
             if k.startswith("audio_encoder.")]
 
     # A topology carries NO dtype — the precision half is the quant rule's,
     # which is why the lane and not the topology answers the dtype question
     # below.
-    for handle, components in corpus.items():
+    for handle, components in raw.items():
         for component, keys in components.items():
             for shape in list(keys.values())[:1]:
                 assert all(isinstance(d, int) for d in shape), (handle, component)
