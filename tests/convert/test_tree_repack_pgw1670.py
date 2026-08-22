@@ -676,3 +676,193 @@ def test_a_bf16_source_asked_only_for_a_repack_is_still_repacked(
     assert published[0].path.resolve() != source_dir.resolve(), (
         "the SOURCE tree was handed to the publisher — the repack was skipped")
     assert _tensor_digests(source_dir), "the ingest tree was consumed rather than read"
+
+
+# ------------------------------------ the REAL key set and the REAL config
+
+
+#: `sensenova/SenseNova-U1.5-8B-MoT-Preview` rev `13a8d0f3`'s own
+#: `config.json`, verbatim and entire (2,631 bytes, fetched at $0 — the
+#: document, not one weight byte). Inline rather than as a fixture file so the
+#: diff shows exactly which document the field map below was proven against.
+_REAL_UPSTREAM_CONFIG: dict[str, Any] = json.loads("""{
+    "architectures": [
+        "NEOChatModel"
+    ],
+    "auto_map": {
+        "AutoConfig": "configuration_neo_chat.NEOChatConfig",
+        "AutoModel": "modeling_neo_chat.NEOChatModel",
+        "AutoModelForCausalLM": "modeling_neo_chat.NEOChatModel"
+    },
+    "downsample_ratio": 0.5,
+    "eos_token_id": 151645,
+    "llm_config": {
+        "_name_or_path": null,
+        "architectures": [
+            "Qwen3ForCausalLM"
+        ],
+        "attention_bias": false,
+        "attention_dropout": 0.0,
+        "bos_token_id": 151643,
+        "eos_token_id": 151645,
+        "head_dim": 128,
+        "hidden_act": "silu",
+        "hidden_size": 4096,
+        "intermediate_size": 12288,
+        "max_position_embeddings": 262144,
+        "max_position_embeddings_hw": 10000,
+        "max_window_layers": 42,
+        "model_type": "qwen3",
+        "num_attention_heads": 32,
+        "num_hidden_layers": 42,
+        "num_key_value_heads": 8,
+        "rms_norm_eps": 1e-06,
+        "rope_scaling": null,
+        "rope_theta": 5000000.0,
+        "rope_theta_hw": 10000.0,
+        "sliding_window": null,
+        "torch_dtype": "bfloat16",
+        "use_cache": false,
+        "use_deepep": false,
+        "use_sliding_window": false,
+        "vocab_size": 151936,
+        "pure_llm": false
+    },
+    "model_type": "neo_chat",
+    "pad_token_id": 151643,
+    "template": "neo1_0",
+    "tie_word_embeddings": false,
+    "torch_dtype": "bfloat16",
+    "transformers_version": "4.37.2",
+    "use_backbone_lora": 0,
+    "use_llm_lora": 0,
+    "min_pixels": 65536,
+    "max_pixels": 16777216,
+    "patch_size": 16,
+    "timestep_shift": 1.0,
+    "time_schedule": "standard",
+    "time_shift_type": "exponential",
+    "base_shift": 0.5,
+    "max_shift": 1.15,
+    "base_image_seq_len": 64,
+    "max_image_seq_len": 4096,
+    "noise_scale_mode": "resolution",
+    "noise_scale_base_image_seq_len": 64,
+    "add_noise_scale_embedding": true,
+    "noise_scale_max_value": 16.0,
+    "noise_scale": 1.0,
+    "P_mean": -0.8,
+    "P_std": 0.8,
+    "t_eps": 0.05,
+    "fm_head_dim": 1536,
+    "fm_head_layers": 2,
+    "fm_head_mlp_ratio": 1,
+    "extra_num_layers_post": 0,
+    "concat_time_token_num": 0,
+    "use_pixel_head": true,
+    "use_adaLN": false,
+    "vision_config": {
+        "architectures": [
+            "NEOVisionModel"
+        ],
+        "attention_dropout": 0.0,
+        "auto_map": {
+            "AutoConfig": "configuration_neo_vit.NEOVisionConfig",
+            "AutoModel": "modeling_neo_vit.NEOVisionModel"
+        },
+        "llm_hidden_size": 4096,
+        "downsample_ratio": 0.5,
+        "hidden_size": 1024,
+        "model_type": "neo_vision",
+        "rope_theta_vision": 10000.0,
+        "max_position_embeddings_vision": 10000,
+        "num_channels": 3,
+        "patch_size": 16,
+        "torch_dtype": "bfloat16",
+        "transformers_version": "4.37.2",
+        "min_pixels": 65536,
+        "max_pixels": 16777216
+    }
+}""")
+
+#: What the endpoint's `transformer/config.json` MUST be: the tree the first
+#: real `gen-worker lock --checkpoint` derive hollow-loaded to 100% on both
+#: components (se#840). `SenseNovaConfig(llm=LLMConfig(**llm), ...)` is built
+#: from these kwargs, so an extra key is a `TypeError` at load and a missing one
+#: is a silently wrong default.
+_ENDPOINT_TRANSFORMER_CONFIG: dict[str, Any] = {
+    "_class_name": "SenseNovaU1",
+    "_diffusers_version": "0.39.0",
+    "llm": {
+        "hidden_size": 4096, "intermediate_size": 12288, "num_hidden_layers": 42,
+        "num_attention_heads": 32, "num_key_value_heads": 8, "head_dim": 128,
+        "rms_norm_eps": 1e-06, "rope_theta": 5000000.0, "rope_theta_hw": 10000.0,
+        "vocab_size": 151936, "attention_bias": False,
+    },
+    "vision": {
+        "hidden_size": 1024, "llm_hidden_size": 4096, "patch_size": 16,
+        "num_channels": 3, "downsample_ratio": 0.5, "rope_theta_vision": 10000.0,
+        "max_position_embeddings_vision": 10000,
+    },
+    "patch_size": 16, "downsample_ratio": 0.5, "t_eps": 0.05, "noise_scale": 1.0,
+    "noise_scale_mode": "resolution", "noise_scale_base_image_seq_len": 64,
+    "noise_scale_max_value": 16.0, "add_noise_scale_embedding": True,
+}
+
+
+def _real_key_names() -> list[str]:
+    """All 1116 upstream key names, out of the VENDORED tensorfs corpus.
+
+    `sensenova-u1.mot@1` (tensorfs#161) was extracted from the real published
+    headers by HTTP range, so its tensor table IS the upstream key set — and it
+    is already in this repo. Copying the names into a fixture would be a second
+    producer of a fact the corpus already carries.
+    """
+
+    root = Path(__file__).resolve().parents[2] / "src" / "gen_worker" / "_vendor"
+    doc = json.loads(
+        (root / "tensorfs" / "spec" / "v2" / "topologies"
+         / "sensenova-u1.mot.v1.json").read_text("utf-8"))
+    names = [n for comp in doc["components"] for n in comp["tensors"]]
+    assert len(names) == 1116, f"the vendored corpus moved: {len(names)} names"
+    return names
+
+
+def test_the_real_key_set_and_the_real_config_produce_the_endpoints_tree(
+    tmp_path: Path,
+) -> None:
+    """The deliverable, against upstream's OWN documents rather than a fixture.
+
+    A field map that resolves on a hand-written fixture and not on the real
+    `config.json` is the exact bug this case exists to catch — the real one
+    nests under `llm_config`/`vision_config`, carries a dead `auto_map`, and
+    states a `timestep_shift` the reference implementation does not serve.
+    """
+
+    tree = tmp_path / "flat"
+    tree.mkdir()
+    (tree / "config.json").write_text(json.dumps(_REAL_UPSTREAM_CONFIG))
+    (tree / "vocab.json").write_text("{}")
+    (tree / "merges.txt").write_text("#version: 0.2\n")
+    (tree / "added_tokens.json").write_text("{}")
+    (tree / "special_tokens_map.json").write_text("{}")
+    (tree / "tokenizer_config.json").write_text(
+        json.dumps({"tokenizer_class": "Qwen2Tokenizer"}))
+    names = _real_key_names()
+    (tree / "model.safetensors").write_bytes(
+        _safetensors({name: ("BF16", 1) for name in names}))
+
+    report = apply_tree_repack(tree, require_tree_repack("sensenova-u1.mot"))
+
+    assert report.tensor_count == 1116, "a real key fell out of the routing"
+    assert json.loads((tree / "transformer" / "config.json").read_text()) == (
+        _ENDPOINT_TRANSFORMER_CONFIG), (
+        "the derived component config is not the one the endpoint's SenseNovaU1 "
+        "kwargs accept — an extra key is a TypeError at load and a missing one "
+        "is a silently wrong default")
+
+    member = tree / "transformer" / "diffusion_pytorch_model.safetensors"
+    raw = member.read_bytes()
+    header = json.loads(raw[8:8 + int.from_bytes(raw[:8], "little")])
+    assert set(header) - {"__metadata__"} == set(names), (
+        "the produced component does not carry exactly the upstream key set")
