@@ -309,14 +309,18 @@ class IntentRegistry:
                     "config_generation regressed",
                 )
             )
-        if int(command.config_generation) > 0 and not bytes(command.config_digest):
-            command_errors.append(
-                (
-                    "",
-                    pb.LIFECYCLE_ERROR_CODE_MISSING_MANDATORY_FIELD,
-                    "config_digest is required when config_generation is set",
-                )
-            )
+        # NO `config_digest is required when config_generation is set` RULE.
+        # It reads like a mandatory-field check and is in fact a dispatch starve
+        # on every fresh boot (#1660). The hub builds the command with
+        # `protocolConfigDigest(resolutionCfg)`, and `resolutionCfg` is legitimately
+        # nil on the FIRST HelloAck of a boot — a build error, a discarded stale
+        # build, or simply no provider yet (`hello_ack.go`) — while
+        # `config_generation` comes from the worker's already-persisted
+        # DesiredResidency and is > 0. Rejecting that pair costs the ACCEPTED
+        # receipt, and no accepted receipt for the CURRENT command is
+        # `exact_goal_receipt_not_accepted`: nothing on the release is
+        # dispatchable. An absent digest is the hub saying it has no config to
+        # describe, never a malformed command.
         if int(command.config_generation) > 0 and not bytes(command.parameter_snapshot):
             command_errors.append(
                 (

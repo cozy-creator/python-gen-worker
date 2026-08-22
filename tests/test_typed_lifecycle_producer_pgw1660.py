@@ -353,6 +353,72 @@ def test_the_complete_producer_DOES_answer_with_the_pair() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Commands the hub really sends
+# ---------------------------------------------------------------------------
+
+
+def _boot_ack(hello: pb.Hello) -> pb.HelloAck:
+    """The FIRST HelloAck of a boot: a config generation the worker's persisted
+    DesiredResidency already carries, and NO config digest, because the hub built
+    the command with a nil `resolutionCfg`."""
+    ack = _ack(hello)
+    ack.desired_state_command.ClearField("config_digest")
+    return ack
+
+
+def test_a_command_with_a_generation_but_no_config_digest_is_ACCEPTED() -> None:
+    """This is not a nicety — it is the shape of the first HelloAck of every
+    boot. `protocolConfigDigest(resolutionCfg)` is empty whenever the hub has no
+    resolution config yet (build error, discarded stale build, no provider),
+    while `config_generation` comes from the persisted DesiredResidency and is
+    > 0. Rejecting the pair costs the ACCEPTED receipt, and no accepted receipt
+    for the CURRENT command is `exact_goal_receipt_not_accepted` — a dispatch
+    starve on the whole release, on every cold boot."""
+    with hub_double(release_id=RELEASE, hello_ack=_boot_ack) as (scheduler, _harness):
+        conn = scheduler.wait_connection(0, timeout=30.0)
+        receipt = conn.wait_for(_is("goal_receipt"), timeout=30.0).goal_receipt
+        assert receipt.status == pb.GOAL_RECEIPT_STATUS_ACCEPTED, (
+            f"a fresh-boot command was refused: {receipt.error_code} {receipt.detail}"
+        )
+
+
+def test_the_two_digests_keep_their_OPPOSITE_encodings() -> None:
+    """`DesiredIntent.snapshot_digest` is the UTF-8 bytes of the digest STRING;
+    `FunctionCapability.binding_digest` is raw sha256 bytes. The asymmetry is the
+    hub's, and a worker that "helpfully" normalises either one breaks a
+    `bytes.Equal` nobody sees fail."""
+    registry = IntentRegistry(RELEASE, list(FUNCTIONS))
+    digest = b"\x00\x01\x02not-utf8-at-all\xff"
+    registry.apply_command(pb.DesiredStateCommand(
+        worker_session_id=registry.worker_session_id,
+        command_seq=1,
+        goal_id="g",
+        release_id=RELEASE,
+        intents=[pb.DesiredIntent(
+            intent_id="i-ready",
+            kind=pb.DESIRED_INTENT_KIND_FUNCTION_READY,
+            cause=pb.DESIRED_INTENT_CAUSE_COLD_BOOT,
+            function_name="echo",
+            binding_digest=digest,
+        )],
+    ))
+    registry.refresh_projection(CapabilityFacts(
+        available=frozenset(FUNCTIONS),
+        residency={REF: pb.ModelResidency(ref=REF, snapshot_digest="blake3:abc")},
+        hot={"echo": pb.DesiredInstance(
+            function_name="echo", models=[pb.ModelBinding(slot="data", ref=REF)],
+        )},
+    ))
+    echo = next(
+        c for c in registry.snapshot().capabilities if c.function_name == "echo"
+    )
+    assert echo.binding_digest == digest, "raw bytes, echoed verbatim"
+    assert echo.models[0].snapshot_digest == b"blake3:abc", (
+        "the UTF-8 bytes of the digest string — never hex-decoded"
+    )
+
+
+# ---------------------------------------------------------------------------
 # The hub's own discard rules, mirrored (tensorhub validateLifecycleSnapshot)
 # ---------------------------------------------------------------------------
 
