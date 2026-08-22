@@ -256,8 +256,7 @@ def iter_source_tensors(
             yield entry.name, name, tensor
 
 
-_ST_FLOAT_DTYPES: frozenset[str] = frozenset(
-    {"F64", "F32", "F16", "BF16", "F8_E4M3", "F8_E5M2"})
+from gen_worker.models.safetensors_header import FLOAT_DTYPES as _ST_FLOAT_DTYPES
 
 
 def stream_reencode(

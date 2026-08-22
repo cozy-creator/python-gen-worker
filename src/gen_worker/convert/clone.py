@@ -35,7 +35,9 @@ from .dtype_pins import (
     verify_produced_tree,
 )
 from .ingest import (
+    MIXED_DTYPE,
     IngestedSource,
+    detect_snapshot_dtype,
     ingest_civitai,
     ingest_huggingface,
     plan_civitai,
@@ -448,6 +450,16 @@ def spec_actions(
     "publishes the source tree directly" and stopped — while the run went on
     to CAST a whole second tree, which the budget then had no term for. The
     two must never again be able to disagree about what happens.
+
+    The question this asks is *"would casting to `spec.dtype` change any
+    bytes?"* — not *"what is this tree mostly?"*. `source_dtype` answers the
+    first because it is strict (``ingest.rollup_dtype``): a tree is a dtype
+    only when every float tensor in it is that dtype, and anything else is
+    ``mixed``. ``mixed`` is not a dtype a caller can request, so it matches
+    nothing and the cast runs — which is right, because a mixed tree WOULD
+    change under any target. Pre-pgw#1668 this line read a majority by tensor
+    COUNT and SenseNova-U1.5's 601 small BF16 islands out-voted its 30 GB F32
+    bulk, so a bf16 request "already matched" a tree that was not bf16.
     """
 
     actions: list[str] = []
@@ -582,8 +594,9 @@ def plan_disk_demand(
         notes.append("hardlink passthrough")
     if (output_sizes and not measured_bits
             and source_dtype not in _DTYPE_STORAGE_BITS):
+        why = "mixed" if source_dtype == MIXED_DTYPE else "unreadable"
         notes.append(
-            f"source dtype unreadable, assumed {_UNRESOLVED_SOURCE_BITS}-bit")
+            f"source dtype {why}, assumed {_UNRESOLVED_SOURCE_BITS}-bit")
 
     # The LAST stage of every clone is a publish, and it is the one the old
     # budget forgot. Its cost is not guessed here: `publish_v2` states it.
@@ -956,6 +969,17 @@ def run_clone(
                 })
                 continue
 
+            # THE DECLARED DTYPE IS READ OFF THE PRODUCED TREE (pgw#1668).
+            # `spec.dtype` is what was ASKED for and `attrs["dtype"]` is what
+            # the flavor builder INTENDED; neither is evidence. A publish-as-is
+            # of a mixed tree, a cast that skipped a pinned component, a
+            # `dtype="source"` passthrough — each lands bytes that no request
+            # describes, and the old label was the request. The tree's own
+            # headers are the only thing that cannot be wrong about it.
+            observed = detect_snapshot_dtype(Path(tree))
+            dtype_label = _dtype_token(
+                observed or str(attrs.get("dtype") or spec.dtype))
+
             metadata: dict[str, Any] = {k: v for k, v in source.metadata.items()}
             try:
                 from .size_walk import compute_size_facts
@@ -988,7 +1012,7 @@ def run_clone(
                 files=files,
                 release=release,
                 mode=mode if i == 0 else "merge",
-                dtype=str(attrs.get("dtype") or spec.dtype),
+                dtype=dtype_label,
                 file_layout=str(attrs.get("file_layout") or spec.file_layout),
                 file_type=str(attrs.get("file_type") or spec.file_type),
                 objective=objective_fact,
