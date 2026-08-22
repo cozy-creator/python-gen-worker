@@ -183,6 +183,14 @@ jobs:
       - name: pgw#1477 guard - uv.lock agrees with pyproject.toml's git pins
         run: python3 scripts/lint_lock_pin_agreement.py
 
+      # pgw#1657: same layer, adjacent hole. `uv sync --locked` checks a
+      # downloaded wheel against the hashes uv.lock holds for the VERSION, and
+      # the cu130 index hashes only some rows — so an unpinned interpreter
+      # picks an unhashed wheel and dies half a gigabyte in with `Hash
+      # mismatch`, blaming the index. ~30 ms, no venv, no network.
+      - name: pgw#1657 guard - .python-version pins an interpreter uv.lock hashes
+        run: python3 scripts/lint_locked_interpreter.py
+
       # pgw#1264: `@v6` HERE ONLY, and the version is the point. `@v4` bundles
       # `@actions/cache` v3, which speaks the cache API GitHub retired, so
       # `enable-cache: true` on `@v4` is dead config that reads as a working
@@ -198,7 +206,7 @@ jobs:
           enable-cache: true
 
       - name: Set up Python
-        run: uv python install 3.12
+        run: uv python install  # the version is .python-version's (pgw#1657)
 
       # --locked (pgw#524 item 6): resolve exactly what uv.lock pins — the
       # same resolution publish.yaml uses on tag push, so PR-CI green
@@ -337,13 +345,21 @@ jobs:
       - name: pgw#1477 guard - uv.lock agrees with pyproject.toml's git pins
         run: python3 scripts/lint_lock_pin_agreement.py
 
+      # pgw#1657: same layer, adjacent hole. `uv sync --locked` checks a
+      # downloaded wheel against the hashes uv.lock holds for the VERSION, and
+      # the cu130 index hashes only some rows — so an unpinned interpreter
+      # picks an unhashed wheel and dies half a gigabyte in with `Hash
+      # mismatch`, blaming the index. ~30 ms, no venv, no network.
+      - name: pgw#1657 guard - .python-version pins an interpreter uv.lock hashes
+        run: python3 scripts/lint_locked_interpreter.py
+
       - name: Install uv
         uses: astral-sh/setup-uv@v4
         with:
           version: "latest"
 
       - name: Set up Python
-        run: uv python install 3.12
+        run: uv python install  # the version is .python-version's (pgw#1657)
 
       - name: Install dependencies
         run: uv sync --locked --extra dev
