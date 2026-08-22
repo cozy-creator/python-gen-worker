@@ -474,9 +474,24 @@ def require_decodable(
     ``keys`` absent is likewise UNDECLARED — a caller that did not classify is
     not a caller that classified as fine.
     """
+    from gen_worker.models.tensor_layout_contract import (
+        AXIS_QUANT,
+        declared_contract_key,
+    )
+
     ds = decode_set if decode_set is not None else runtime_decode_set()
     declared = ds.rules()
-    if rule not in declared:
+    # THE BIND DOOR, worker-side (pgw#1665). `rule` arrives from the BOUND
+    # VARIANT — the hub's catalog — and `declared` is what this IMAGE said it
+    # decodes. tensorfs#153 moved `cozy.fp8-rowwise` @1 -> @2, and the hub's
+    # resweep is re-deriving checkpoints onto `@2` one row at a time while every
+    # released image still declares `@1`. On a literal comparison each moved row
+    # turns into `decode_set_rule_undeclared` for a tree this image reads
+    # perfectly well — the same door th#2301 opened hub-side with the same
+    # answer: compare the DESCRIPTOR DIGEST the two handles resolve to, never
+    # the spelling. A handle that does not resolve still compares as a literal.
+    want = declared_contract_key(rule, axis=AXIS_QUANT)
+    if want not in {declared_contract_key(d, axis=AXIS_QUANT) for d in declared}:
         raise RuleNotDecodableError(
             rule,
             declared=tuple(sorted(declared)),

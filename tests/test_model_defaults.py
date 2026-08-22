@@ -522,10 +522,21 @@ def _library_has(name: str) -> bool:
     the TOPOLOGY question, so that is what is asked here — and the `-bf16`
     suffix these callers used to pass is not part of a topology handle,
     because a topology carries no dtype at all.
-    """
-    from gen_worker.models.tensor_layout_contract import known_topologies
 
-    return f"{name}@1" in known_topologies()
+    pgw#1665: asked THROUGH resolution rather than by pinning `@1`. "Does
+    tensorfs publish a document for this family" is a version-agnostic question,
+    and tensorfs#153 replaced nine of these records at `@2` — a literal `@1`
+    test answered "no document" for `sd15`, `sdxl` and `ltx2-upsampler` the
+    moment the corpus moved, which is the opposite of what it means. This asks
+    exactly what an endpoint declaring `<name>@1` asks.
+    """
+    from gen_worker.models.tensor_layout_contract import (
+        AXIS_TOPOLOGY,
+        resolve_declared_handle,
+    )
+
+    return resolve_declared_handle(
+        f"{name}@1", axis=AXIS_TOPOLOGY, where="_library_has") is not None
 
 
 def test_the_llm_roots_declare_no_lane_and_no_card_budget() -> None:
