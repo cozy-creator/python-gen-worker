@@ -480,6 +480,47 @@ class ZImageDefaults(msgspec.Struct, frozen=True):
     cfg: bool = True
     step_distilled: bool = False
     max_sequence_length: int = 512
+
+
+class SenseNovaU1Defaults(msgspec.Struct, frozen=True):
+    """SenseNova-U1.5-8B-MoT — SenseTime's NEO-unify, text-to-image AND
+    reference-image editing under ONE vocabulary root, the same one-root shape
+    as :class:`QwenImage`.
+
+    The values are the REFERENCE IMPLEMENTATION'S SERVING values, taken from its
+    ``examples/{t2i,editing}/inference.py``, and two of them disagree with the
+    checkpoint's own ``config.json`` — the config loses, because nothing upstream
+    ever reads it for these:
+
+    * ``timestep_shift`` **3.0**, where ``config.timestep_shift`` is 1.0. Every
+      upstream example passes 3.0 and their ``time_schedule`` is hard-forced to
+      ``"standard"``, so the config value is dead.
+    * ``guidance`` 4.0 is a REAL classifier-free CFG — a second prefix over the
+      empty prompt and a second KV cache — not a guidance embedding, so ``cfg``
+      is True and the arm count is a serving fact, not a batch axis.
+
+    ``img_guidance`` is the EDIT arm's second axis: above 1.0 a third
+    (images-only) prefix is built and the denoise step runs three times per
+    timestep, combined ``v = v_un + cfg*(v_cond - v_img) + img_cfg*(v_img -
+    v_un)``. 1.0 is upstream's default and means two arms, not three.
+    """
+
+    steps: Knob[int] = Knob(50, lo=1, hi=100, name="steps")
+    guidance: Knob[float] = Knob(4.0, lo=1.0, hi=10.0, name="guidance")
+    #: The edit arm's reference-hold axis. Floor 1.0: below it the combination
+    #: above inverts the sign on the image term.
+    img_guidance: Knob[float] = Knob(1.0, lo=1.0, hi=10.0, name="img_guidance")
+    #: Flow-matching sigma shift, applied as `s*o/(1+(s-1)*o)`. Not a Knob: it
+    #: reshapes the whole trajectory rather than trading quality for time, and
+    #: no upstream surface exposes it per request.
+    timestep_shift: float = 3.0
+    cfg: bool = True
+    #: An 8-step distill LoRA exists upstream; no checkpoint we publish carries
+    #: it yet, so the platform value is the undistilled recipe and a distilled
+    #: sibling flips this in its own hub row.
+    step_distilled: bool = False
+
+
 class StableAudioDefaults(msgspec.Struct, frozen=True):
     """Stable Audio Open 1.0 — Stability's latent-diffusion text-to-audio DiT, and every fine-tune of it."""
 
@@ -680,6 +721,29 @@ class ZImage(ModelType[ZImageDefaults]):
     contracts = ("z-image.*",)
     canonical_scheduler_config = Z_IMAGE_SCHEDULER_CONFIG
     Defaults = ZImageDefaults
+
+
+class SenseNovaU1(ModelType[SenseNovaU1Defaults]):
+    """SenseNova-U1 — the natively unified MoT family (understanding +
+    generation in one set of weights), serving text-to-image and editing under
+    one vocabulary root (see :class:`SenseNovaU1Defaults`).
+
+    NO ``canonical_scheduler_config``: there is no scheduler and no ``diffusers``
+    pipeline to synthesize one for. The trajectory is a shifted linspace over
+    [0, 1] built inside the sampler, and the model is VAE-FREE — the flow state
+    IS the image, so there is nothing an ingest-time scheduler document would
+    describe.
+
+    The fingerprint is ``sensenova-u1.*`` and it covers the whole family
+    (``…-8B-MoT``, ``…-A3B``, the SFT and Infographic specializations): they are
+    the same architecture, and which checkpoint is which is a checkpoint fact.
+    """
+
+    name = "sensenova-u1"
+    contracts = ("sensenova-u1.*",)
+    Defaults = SenseNovaU1Defaults
+
+
 class StableAudio(ModelType[StableAudioDefaults]):
     """Stable Audio Open 1.0 and its fine-tunes — stable-audio-open and foundation-1 under ONE root (identical transformer header sha256, differing weight digests). The fingerprint is stable-audio.* and must NEVER be flux*: a bare flux.*/flux2.* pattern can match this audio checkpoint's tree."""
 
@@ -753,6 +817,7 @@ MODEL_TYPES: Final[tuple[type[ModelType[msgspec.Struct]], ...]] = (
     Ernie,
     QwenImage,
     ZImage,
+    SenseNovaU1,
     StableAudio,
     MusicGen,
     Ltx2,
@@ -818,6 +883,7 @@ def defaults_vocabularies() -> dict[str, type[msgspec.Struct]]:
         Flux2Klein.name: Flux2Klein.Defaults,
         QwenImage.name: QwenImage.Defaults,
         ZImage.name: ZImage.Defaults,
+        SenseNovaU1.name: SenseNovaU1.Defaults,
         Krea2.name: Krea2.Defaults,
         Anima.name: Anima.Defaults,
         Ernie.name: Ernie.Defaults,
@@ -877,6 +943,8 @@ __all__ = [
     "SD15",
     "SchedulerName",
     "SD2",
+    "SenseNovaU1",
+    "SenseNovaU1Defaults",
     "SDXL",
     "Sd15Defaults",
     "Sd15LoraDefaults",
