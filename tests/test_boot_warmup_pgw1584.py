@@ -417,7 +417,7 @@ def test_the_boot_picks_come_off_the_hubs_OWN_DesiredResidency_Hot() -> None:
     """Nothing is invented: `DesiredResidency.Hot` is `repeated DesiredInstance {function_name, models}` and `models` is the very `ModelBinding` a dispatch carries — slot, ref, the recognized `model` name..."""
     from gen_worker.worker import boot_picks
 
-    loaded = load_endpoint(FIXTURE_DIR)
+    loaded = object()
     desired = pb.DesiredResidency(generation=1, disk_refs=[DREAM, "org/other@1"])
     desired.snapshots[DREAM].CopyFrom(pb.Snapshot(digest="sha256:beef"))
     instance = desired.hot.add()
@@ -435,17 +435,14 @@ def test_the_boot_picks_come_off_the_hubs_OWN_DesiredResidency_Hot() -> None:
     assert table.by_ref[DREAM].inference_defaults == '{"steps": 4}'
 
 
-def test_one_slot_and_one_ref_is_ARITHMETIC_but_anything_else_is_a_GUESS() -> None:
-    """The hub seeds `Hot` for dynamic-slot defaults and compile-cache prewarm; a static-binding release can arrive with it empty."""
+def test_no_hot_binding_means_no_boot_pick() -> None:
+    """A missing hub binding is absent, never synthesized from disk refs."""
     from gen_worker.worker import boot_picks
 
-    loaded = load_endpoint(FIXTURE_DIR)
+    loaded = object()
 
     single = _config_for(DREAM)
-    picks = boot_picks(pb.DesiredResidency(), loaded, single)
-    assert picks["generate"].by_slot == {"model": DREAM}
-    assert picks["generate"].by_ref[DREAM].manifest_digest == "sha256:beef"
-    assert picks["generate"].by_ref[DREAM].model == ""
+    assert boot_picks(pb.DesiredResidency(), loaded, single) == {}
 
     two = pb.DesiredResidency(generation=1, disk_refs=[DREAM, "org/other@1"])
     assert boot_picks(two, loaded, CheckpointConfig.from_wire(two)) == {}

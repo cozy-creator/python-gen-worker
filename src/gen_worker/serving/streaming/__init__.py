@@ -13,18 +13,16 @@ from .census import (
     TensorRow,
 )
 from .engine import LoadError, LoadReport, NameMismatch, StreamingLoader
+from .fill_client import Destination
 from .skeleton import Skeleton, SkeletonError
 from .source import (
-    BridgeWeightStore,
     NativeWeightStore,
     StreamedTensor,
     TensorStream,
     WeightStore,
     WeightStoreUnavailable,
-    native_available,
     store_for,
 )
-from .staging import StagingPool
 
 logger = logging.getLogger(__name__)
 
@@ -57,12 +55,12 @@ def engine_for(
 
 __all__ = [
     "engine_for",
-    "BridgeWeightStore",
     "CENSUS_KIND",
     "Census",
     "CensusError",
     "CensusMismatch",
     "ComponentCensus",
+    "Destination",
     "TensorRow",
     "LoadError",
     "LoadReport",
@@ -70,12 +68,10 @@ __all__ = [
     "NativeWeightStore",
     "Skeleton",
     "SkeletonError",
-    "StagingPool",
     "StreamedTensor",
     "StreamingLoader",
     "TensorStream",
     "WeightStore",
     "WeightStoreUnavailable",
-    "native_available",
     "store_for",
 ]

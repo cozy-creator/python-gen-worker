@@ -332,9 +332,6 @@ message DesiredResidency {
   uint64 generation = 1;
   repeated string disk_refs = 2;
   repeated DesiredInstance hot = 3;
-  // th#1941: keyed by COMPOSED MANIFEST DIGEST, not by canonical ref. Two
-  // resolutions of one repo that differ in their component sources are two
-  // entries with two digests and cannot interfere.
   map<string, Snapshot> snapshots = 4;
   // th#1087/th#1085: hub-authoritative desired state is the PAIR
   // (release_id, config_generation). config_generation is the release's
@@ -819,10 +816,9 @@ message RunJob {
   MediaBytes media_bytes = 9;  // client's `Prefer: bytes=inline|url` media-delivery preference
   ResolvedCompute compute = 10;
   repeated ModelBinding models = 11; // slot -> ref bindings resolved by the orchestrator
-  // th#1941: presigned snapshots keyed by COMPOSED MANIFEST DIGEST, not by
-  // canonical ref. Ordinary warm-local bindings may be omitted;
-  // required_compile retains every exact model digest plus the selected graph
-  // so the worker can revalidate immutable execution identity.
+  // Presigned snapshots keyed by canonical ref. Ordinary warm-local bindings
+  // may be omitted; required_compile retains every exact model digest plus the
+  // selected graph so the worker can revalidate immutable execution identity.
   map<string, Snapshot> snapshots = 12;
   // Unique exact current-state fence selected by Tensorhub. Multiple
   // applicable targets fail closed. Mandatory for W8A8; when present on any
@@ -903,11 +899,10 @@ message RequiredCompileExecution {
 
 // th#2082: this is the client's `Prefer: bytes=` header and nothing else — how
 // MEDIA outputs are delivered, decided before the job runs. It is NOT the
-// function's output cardinality (`EndpointSpec.output_mode`, pgw#1320) and NOT
-// the SSE terminal payload's `delivery` key (th#2079); all three wore one
-// generic name until those issues split them. Field 9 and the enum numbers are
-// unchanged by the rename, so the wire is untouched and a hub or worker on an
-// older build still parses it.
+// function's output cardinality and NOT the SSE terminal payload's `delivery`
+// key (th#2079); all three wore one generic name until those two issues split
+// them. Field 9 and the enum numbers are unchanged by the rename, so the wire
+// is untouched and a worker on an older wheel still parses it.
 enum MediaBytes {
   MEDIA_BYTES_UNSPECIFIED = 0;
   MEDIA_BYTES_URL         = 1; // upload media, return refs (default behavior)
@@ -940,9 +935,14 @@ message ModelBinding {
   // (precedence: explicit payload value > this > endpoint fallback preset).
   // Additive: old workers ignore this field.
   string inference_defaults = 4;
-  // th#1941: `components` was the SUBTRACTION — "load the base composition,
-  // then substitute", the only wire syntax for "load X but not part of X".
-  // The hub now composes hub-side and sends a resolved manifest.
+  // th#2106 / pgw#1246: `components` was the SUBTRACTION — "load the base
+  // composition, then substitute" — and it never had a reader. gen-worker
+  // deleted the whole load-then-substitute apparatus and reserved this number
+  // in its own copy of this file; a hub still stamping it would be writing a
+  // promise the far side cannot read. The substitution is now applied hub-side
+  // by COMPOSING the manifest the slot ships (runtimestore.ComposeComponents),
+  // so what crosses the wire is one resolved tree whose component paths already
+  // hold the substitute's bytes.
   reserved 5;
   reserved "components";
   // th#1139 (pgw#654) objective split, retiring th#1017's never-landed regime
@@ -963,28 +963,21 @@ message ModelBinding {
   // beside inference_defaults — (model, defaults) per bound checkpoint — and
   // the worker's read-side typed decode (`ctx.defaults`, pgw#1377) is the
   // authority on the pair; the hub never interprets either. Additive.
-  //
-  // pgw#1415: NUMBER 9 IS THE HUB'S, and it is the SHIPPING one. th#1941 took
-  // 9 here for `manifest_digest` while tensorhub still had 8 free, th#2140 then
-  // took 9 there for `model`, and the two protos meant different things by the
-  // same tag — the hub stamped a model name that this worker read as a fetch
-  // pointer. The tie breaks toward the field that has a SENDER: tensorhub
-  // stamps `model` on every dispatch (scheduler_dispatch.go, `mb.Model`),
-  // and NOTHING has ever sent `manifest_digest` — th#1941's hub leg is still a
-  // PARKED DRAFT (tensorhub PR #1219). So this side moves, and the hub's
-  // number stands.
   string model = 9;
-  // The composed manifest digest this slot fetches (th#1941). Key into
-  // DesiredResidency.snapshots / RunJob.snapshots. `ref` above survives as
-  // the display/audit label; THIS is the fetch pointer.
-  //
-  // pgw#1415: moved 9 -> 10 (see above). tensorhub owes the SENDER at THIS
-  // number — th#1941, whose parked draft PR #1219 predates th#2140 and would
-  // RE-ADD the collision at 9 if it ever landed as authored. Until it lands a
-  // v2 dispatch carries no fetch pointer at all
-  // and `HubBindingResolver` refuses naming it, which is the correct state:
-  // the alternative was reading the hub's `model` string as a digest.
-  string manifest_digest = 10;
+  // th#2208 hardcut: pgw once declared `manifest_digest = 10`, but the hub
+  // never had that field or a sender for it. The worker now resolves the tree
+  // the plain-config pull materialized. Reserve both markers before adding the
+  // Bind Contract carrier so a retired fetch pointer cannot silently become a
+  // different fact inside this major.
+  reserved 10;
+  reserved "manifest_digest";
+  // th#2290 / pgw#1653: the immutable Bind Contract selected for THIS exact
+  // resolved checkpoint config tree. Digest is its repo-CAS address; URL is a
+  // bounded presigned GET for those bytes. Both are required together. The
+  // document itself carries (release, derive image digest, config digest), so
+  // a census refusal is attributable to the bind rather than to this pod.
+  string bind_contract_digest = 11;
+  string bind_contract_url = 12;
 }
 
 // One LoRA adapter overlay: a resolved tensorhub ref + its adapter weight.
@@ -1013,36 +1006,8 @@ message LoraOverlay {
 // never calls tensorhub for ref resolution; the orchestrator is the only
 // resolver and ships snapshots on DesiredResidency / RunJob.
 message Snapshot {
-  // th#1941 — the COMPOSED manifest digest: sha256 over the sorted
-  // (path, digest, size) triples of `files`. For an uncomposed variant it
-  // equals that variant's own storage digest. Fetch identity, dispatch key
-  // AND the worker's snapshot directory name — one key, one meaning.
-  string digest = 1;
-  // THE WHOLE TRUTH. Every file the pod puts on disk for this entry, already
-  // composed hub-side: a component sourced from another release appears here
-  // remapped under its subfolder, and the displaced files are simply ABSENT.
-  // Nothing here can express subtraction because there is nothing to subtract
-  // from — the list is the answer, not an input to one.
+  string digest = 1; // snapshot digest the download is pinned to
   repeated SnapshotFile files = 2;
-  // Audit/display ONLY. A worker that reads this to decide what to fetch has
-  // reintroduced the bug this deletes; `files` is complete by construction.
-  ResolvedProvenance provenance = 3;
-}
-
-// th#1941 — where a composed manifest's files came from. Audit/display only.
-message ResolvedProvenance {
-  string repo       = 1;  // owner/repo
-  string release    = 2;  // author-chosen release identifier (th#1936)
-  string variant_id = 3;  // the variant the contract-spec resolved to (th#1938)
-  // component -> where that component's files came from, for components NOT
-  // supplied by variant_id.
-  map<string, ComponentOrigin> component_sources = 4;
-}
-
-message ComponentOrigin {
-  string repo       = 1;
-  string release    = 2;
-  string variant_id = 3;
 }
 
 message SnapshotFile {

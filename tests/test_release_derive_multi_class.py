@@ -90,6 +90,22 @@ def test_a_release_derives_every_compile_marking_class(
     ) == 0
     document = json.loads(out.read_bytes())
 
+    # pgw#1653: BOTH distinct config trees state their own census. The old
+    # primary-only field warned about EditModel and then let absence look green.
+    assert "construction_census" not in document
+    census_rows = document["construction_censuses"]
+    assert len(census_rows) == 2, census_rows
+    by_owner = {
+        tuple(row["owners"]): row["census"] for row in census_rows
+    }
+    assert ("$primary",) in by_owner
+    assert ("EditModel",) in by_owner
+    assert by_owner[("$primary",)]["components"]
+    assert by_owner[("EditModel",)]["components"]
+    assert by_owner[("$primary",)] != by_owner[("EditModel",)], (
+        "the wider EditModel tree produced the primary tree's census"
+    )
+
     # BOTH classes are the release, and the endpoint name says so.
     assert document["endpoint"].endswith(":EditModel+PrimaryModel")
     classes = {row["class"]: row for row in document["classes"]}

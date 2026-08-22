@@ -220,7 +220,7 @@ class ServeLoop:
         resolver: BindingResolver,
         engine: Optional[LoaderEngine] = None,
         lane_contract: str = "",
-        compile_sink_for: Optional[Callable[[type, Any], Any]] = None,
+        compile_sink_for: Optional[Callable[[type, Any, DeployBinding], Any]] = None,
         on_loaded: Optional[Callable[[type, Any], None]] = None,
         output_dir: Optional[Path] = None,
         context_kwargs: Optional[Mapping[str, Any]] = None,
@@ -303,7 +303,7 @@ class ServeLoop:
             if lane is None and resolved is not None:
                 lane = getattr(resolved.declared, "contract", None)
             sink = (
-                self._compile_sink_for(model_cls, lane)
+                self._compile_sink_for(model_cls, lane, binding)
                 if self._compile_sink_for is not None
                 else None
             )

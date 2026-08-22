@@ -89,7 +89,7 @@ import time
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Sequence, Set, Tuple
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
 from .._vendor.tensorfs.layout2 import ExpectedHeader, LayoutTensor
 from .arena_residency import (
@@ -100,10 +100,15 @@ from .arena_residency import (
     dlpack_dtype,
 )
 from .safetensors_header import header_len_ok
+from ..serving.streaming.fill_client import (
+    AddressSource,
+    CudaFillClient,
+    Destination,
+    FileSource,
+    HostFillClient,
+)
 
 logger = logging.getLogger(__name__)
-
-_DL_UINT8 = (1, 8)
 
 DEFAULT_HOST_FLOOR_BYTES = 4 << 30
 
@@ -420,7 +425,6 @@ class CheckpointImage:
         *,
         torch_mod: Any,
         varena_mod: Any = None,
-        engine: Any = None,
         pin: bool = True,
     ) -> None:
         self.checkpoint_id = checkpoint_id
@@ -456,27 +460,43 @@ class CheckpointImage:
         if buffer is None:
             buffer = torch_mod.empty(n, dtype=torch_mod.uint8)
         self.buffer = buffer
-        self._build(engine)
+        self._build()
 
-    def _build(self, engine: Any) -> None:
+    def _build(self) -> None:
         torch = self._torch
-        straight: List[Tuple[str, int, int, int, int]] = []
         casts: List[Tuple[SlotSpec, SlotSource]] = []
         base_ptr = int(self.buffer.data_ptr())
-        for region in self.layout.regions:
-            for slot in region.slots:
-                src = self.manifest[_slot_key(slot)]
-                if (src.dtype_code, src.dtype_bits) == (slot.dtype_code, slot.dtype_bits):
-                    straight.append(
-                        (str(src.path), src.offset, src.length, base_ptr + slot.offset, 0)
-                    )
-                else:
-                    casts.append((slot, src))
-        if straight:
-            if engine is not None:
-                engine.submit(straight, 0).wait()
+        sources: List[FileSource] = []
+        cursor = 0
+        slots = sorted(
+            (slot for region in self.layout.regions for slot in region.slots),
+            key=lambda slot: slot.offset,
+        )
+        for slot in slots:
+            if slot.offset > cursor:
+                sources.append(FileSource(None, 0, slot.offset - cursor))
+            src = self.manifest[_slot_key(slot)]
+            if (src.dtype_code, src.dtype_bits) == (slot.dtype_code, slot.dtype_bits):
+                sources.append(FileSource(str(src.path), src.offset, src.length))
             else:
-                self._pread(straight, base_ptr)
+                sources.append(FileSource(None, 0, slot.nbytes))
+                casts.append((slot, src))
+            cursor = slot.offset + slot.nbytes
+        if cursor < self.layout.virtual_bytes:
+            sources.append(FileSource(None, 0, self.layout.virtual_bytes - cursor))
+        if sources:
+            HostFillClient().fill_files(
+                sources,
+                Destination(
+                    name=self.checkpoint_id,
+                    pointer=base_ptr,
+                    capacity=self.layout.virtual_bytes,
+                    source_offset=0,
+                    shape=(self.layout.virtual_bytes,),
+                    element_bytes=1,
+                    layout="torch.contiguous@1",
+                ),
+            )
         for slot, src in casts:
             file_dtype = _torch_dtype(torch, src.dtype_code, src.dtype_bits)
             lane_dtype = _torch_dtype(torch, slot.dtype_code, slot.dtype_bits)
@@ -494,21 +514,6 @@ class CheckpointImage:
             self.casts += 1
         for region in self.layout.regions:
             self.region_digests[region.name] = self.region_digest(region)
-
-    def _pread(
-        self, requests: Sequence[Tuple[str, int, int, int, int]], base_ptr: int
-    ) -> None:
-        mv = memoryview(self.buffer.numpy())
-        for path, offset, length, host_ptr, _dev in requests:
-            start = host_ptr - base_ptr
-            with open(path, "rb") as fh:
-                fh.seek(offset)
-                got = fh.readinto(mv[start : start + length])
-            if got != length:
-                raise JuggleRefusal(
-                    f"{self.checkpoint_id}: short read from {path} "
-                    f"({got} of {length} bytes)"
-                )
 
     def region_bytes(self, region: RegionSpec) -> Any:
         return self.buffer[region.offset : region.offset + region.span]
@@ -559,14 +564,12 @@ class CheckpointCatalog:
         *,
         torch_mod: Any,
         varena_mod: Any = None,
-        engine_factory: Optional[Callable[[], Any]] = None,
         host_floor_bytes: int = DEFAULT_HOST_FLOOR_BYTES,
         mem_available: Callable[[], int] = _mem_available_bytes,
     ) -> None:
         self.layout = layout
         self._torch = torch_mod
         self._varena = varena_mod
-        self._engine_factory = engine_factory
         self.host_floor_bytes = int(host_floor_bytes)
         self._mem_available = mem_available
         self.manifests: Dict[str, Dict[str, SlotSource]] = {}
@@ -630,10 +633,9 @@ class CheckpointCatalog:
                 self.host_floor_bytes / (1 << 30), self.pressure_epoch,
             )
             return None
-        engine = self._engine_factory() if self._engine_factory else None
         image = CheckpointImage(
             checkpoint_id, self.layout, manifest,
-            torch_mod=self._torch, varena_mod=self._varena, engine=engine,
+            torch_mod=self._torch, varena_mod=self._varena,
         )
         self.images[checkpoint_id] = image
         self._lru.append(checkpoint_id)
@@ -775,7 +777,6 @@ class CheckpointJuggler:
             self.layout,
             torch_mod=residency._torch,
             varena_mod=residency._varena,
-            engine_factory=residency._engine_for,
         )
         if not residency.adopted:
             raise ValueError(
@@ -791,6 +792,9 @@ class CheckpointJuggler:
         self.rearms = 0
         self.reports: List[SwitchReport] = []
         self._residue_bytes = self._count_residue()
+        self._fill_client = CudaFillClient(
+            64 << 20, int(residency.device.index or 0)
+        )
 
     def admit(self, checkpoint_id: str, manifest: Dict[str, SlotSource]) -> None:
         self.catalog.admit(checkpoint_id, manifest)
@@ -838,18 +842,13 @@ class CheckpointJuggler:
         from_id = self.serving_id
 
         device = self.residency.device
-        stream = torch.cuda.Stream(device=device)
-        stream.wait_stream(torch.cuda.current_stream(device))
         with torch.no_grad():
             self.residency.ring.drain()
             for region in self.layout.regions:
                 if self.residency.is_resident(region.name):
                     self.ledger.begin(region.name, checkpoint_id)
                     try:
-                        with torch.cuda.stream(stream):
-                            bytes_moved += self._refill_backed(
-                                region, image, manifest, stream
-                            )
+                        bytes_moved += self._refill_backed(region, image, manifest)
                     except Exception:
                         self.ledger.poison(region.name)
                         logger.error(
@@ -876,7 +875,6 @@ class CheckpointJuggler:
                 key: (src.path, src.offset, src.length)
                 for key, src in manifest.items()
             }
-            torch.cuda.current_stream(device).wait_stream(stream)
             torch.cuda.synchronize(device)
             backing_verified = self._verify_backing(checkpoint_id)
 
@@ -923,17 +921,31 @@ class CheckpointJuggler:
         region: RegionSpec,
         image: Optional[CheckpointImage],
         manifest: Dict[str, SlotSource],
-        stream: Any,
     ) -> int:
-        if image is not None:
-            dst = self._device_bytes(region)
-            src = image.region_bytes(region)
-            dst.copy_(src, non_blocking=image.pinned)
-            return region.span
         base = int(self.residency.reservation.base_ptr)
-        requests = []
-        moved = 0
-        for slot in region.slots:
+        destination = Destination(
+            name=region.name,
+            pointer=base + region.offset,
+            capacity=region.span,
+            source_offset=0,
+            shape=(region.span,),
+            element_bytes=1,
+            layout="torch.contiguous@1",
+        )
+        if image is not None:
+            stats = self._fill_client.fill_address(
+                AddressSource(
+                    pointer=int(image.buffer.data_ptr()) + region.offset,
+                    capacity=region.span,
+                ),
+                destination,
+            )
+            return int(stats.destination_bytes)
+        sources: List[FileSource] = []
+        cursor = region.offset
+        for slot in sorted(region.slots, key=lambda item: item.offset):
+            if slot.offset > cursor:
+                sources.append(FileSource(None, 0, slot.offset - cursor))
             src = manifest[_slot_key(slot)]
             if (src.dtype_code, src.dtype_bits) != (slot.dtype_code, slot.dtype_bits):
                 raise JuggleRefusal(
@@ -941,23 +953,13 @@ class CheckpointJuggler:
                     f"flight; warm this checkpoint first (the image is where "
                     f"casts happen, once)"
                 )
-            requests.append(
-                (str(src.path), src.offset, src.length, 0, base + slot.offset)
-            )
-            moved += src.length
-        handle = self.residency._engine_for().submit(
-            requests, int(stream.cuda_stream) if stream is not None else 0
-        )
-        handle.wait()
-        return moved
-
-    def _device_bytes(self, region: RegionSpec) -> Any:
-        torch = self.residency._torch
-        return torch.from_dlpack(
-            self.residency.reservation.tensor(
-                region.offset, [region.span], *_DL_UINT8
-            )
-        )
+            sources.append(FileSource(str(src.path), src.offset, src.length))
+            cursor = slot.offset + slot.nbytes
+        end = region.offset + region.span
+        if cursor < end:
+            sources.append(FileSource(None, 0, end - cursor))
+        stats = self._fill_client.fill_files(sources, destination)
+        return int(stats.destination_bytes)
 
     def _count_residue(self) -> int:
         from .stream_residency import own_tensors, tensor_bytes

@@ -1,4 +1,4 @@
-"""``ctx.load``'s engine: chunk store -> pinned staging -> device, no files.
+"""``ctx.load``'s engine: plan destinations, ask tensorfs to fill, fence.
 
 The load's postcondition is not asserted here. It is stated by the CONSTRUCTION
 CENSUS (:mod:`.census`, pgw#1647) and this engine REPLAYS it: after the fill and
@@ -22,19 +22,21 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import (
-    TYPE_CHECKING, Any, Dict, FrozenSet, List, Mapping, Optional, Sequence, Tuple,
+    TYPE_CHECKING, Any, Dict, FrozenSet, List, Mapping, Optional, Tuple,
 )
 
 from . import census as _census
 from . import keymap as _keymap
 from . import skeleton as _skeleton
-from .source import StreamedTensor, TensorStream, WeightStore, component_of
-from .staging import DEFAULT_BUFFER_BYTES, DEFAULT_BUFFERS, StagingPool
+from .fill_client import Destination, FillClient, client_for
+from .source import WeightStore, component_of
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     import torch
 
 logger = logging.getLogger(__name__)
+
+DEFAULT_STAGING_BYTES = 64 * 1024 * 1024
 
 _TORCH_DTYPE: Mapping[str, str] = {
     "F64": "float64",
@@ -79,12 +81,12 @@ class LoadReport:
 
     weights_streamed_bytes: int = 0
     weights_stream_gbps: float = 0.0
-    source: str = "bridge"
-    staging: str = "pageable"
+    source: str = "native"
+    staging: str = "destination"
     io: str = "buffered"
     containers: int = 0
     tensors: int = 0
-    windows: int = 0
+    chunks: int = 0
     seconds: float = 0.0
     dtypes: Tuple[str, ...] = ()
     cast_to_lane: int = 0
@@ -100,19 +102,6 @@ class LoadReport:
             "tensors": self.tensors,
             "cast_to_lane": self.cast_to_lane,
         }
-
-
-@dataclass(slots=True)
-class _Placement:
-
-    name: str
-    offset: int
-    nbytes: int
-    flat: "torch.Tensor"
-
-    @property
-    def end(self) -> int:
-        return self.offset + self.nbytes
 
 
 @dataclass(slots=True)
@@ -172,12 +161,6 @@ def _install(slot: _Slot, tensor: "torch.Tensor") -> None:
         slot.owner._buffers[slot.leaf] = tensor
 
 
-def _flat_bytes(tensor: "torch.Tensor") -> "torch.Tensor":
-    import torch
-
-    return tensor.view(-1).view(torch.uint8)
-
-
 class StreamingLoader:
 
     def __init__(
@@ -186,16 +169,16 @@ class StreamingLoader:
         *,
         device: Any = "cuda",
         io: str = "buffered",
-        buffer_bytes: int = DEFAULT_BUFFER_BYTES,
-        buffers: int = DEFAULT_BUFFERS,
+        staging_bytes: int = DEFAULT_STAGING_BYTES,
     ) -> None:
         if io not in ("buffered", "direct"):
             raise LoadError(f"io must be 'buffered' or 'direct', not {io!r}")
         self._store = store
         self._device = device
         self._io = io
-        self._buffer_bytes = int(buffer_bytes)
-        self._buffers = int(buffers)
+        if staging_bytes <= 0:
+            raise LoadError("tensorfs staging must hold bytes")
+        self._staging_bytes = int(staging_bytes)
         self._planned: List[Tuple[str, str]] = []
         self.last_report: Optional[LoadReport] = None
         #: The census the last load actually produced and the fence accepted.
@@ -206,7 +189,14 @@ class StreamingLoader:
         """What the last load BUILT, as data — the fence's own answer."""
         return self._census
 
-    def build(self, pipeline_cls: type, *, checkpoint_dir: Path, lane: Any) -> Any:
+    def build(
+        self,
+        pipeline_cls: type,
+        *,
+        checkpoint_dir: Path,
+        lane: Any,
+        expected_census: Optional[_census.Census] = None,
+    ) -> Any:
         """Meta skeleton, then weights streamed into it."""
         import torch
 
@@ -222,32 +212,36 @@ class StreamingLoader:
         # release's census beside the resolved variant, `expected` is read from
         # it instead and the same predicate then also catches an image that
         # builds a different module than the one the release was derived from.
-        expected = self._expected_census(built)
+        expected = (
+            expected_census
+            if expected_census is not None
+            else self._expected_census(built)
+        )
         report = LoadReport(
             io=self._io,
             source=str(getattr(self._store, "KIND", type(self._store).__name__)),
         )
         recasts: List[Tuple[_Slot, str, Any]] = []
 
-        with StagingPool(
-            device,
-            buffer_bytes=self._buffer_bytes,
-            buffers=self._buffers,
-        ) as pool:
-            report.staging = pool.staging
-            for component, container in self._plan(built.modules):
-                self._stream_container(
-                    built.modules[component],
-                    component,
-                    container,
-                    pool=pool,
-                    device=device,
-                    report=report,
-                    compute_dtype=compute_dtype,
-                    recasts=recasts,
-                    lane_exempt=_lane_exempt(built, component),
-                )
-            report.containers = len(self._planned)
+        fill_client = client_for(
+            device.type,
+            device_index=int(device.index or 0),
+            staging_bytes=self._staging_bytes,
+        )
+        report.staging = fill_client.staging
+        for component, container in self._plan(built.modules):
+            self._fill_container(
+                built.modules[component],
+                component,
+                container,
+                fill_client=fill_client,
+                device=device,
+                report=report,
+                compute_dtype=compute_dtype,
+                recasts=recasts,
+                lane_exempt=_lane_exempt(built, component),
+            )
+        report.containers = len(self._planned)
         self._cast_to_lane(recasts, compute_dtype, report)
 
         # The prepare seam's TRAILING half, once per component and in one
@@ -281,7 +275,7 @@ class StreamingLoader:
         self._assert_lane_dtype(built.modules, compute_dtype, built)
         logger.info(
             "ctx.load: %s resident on %s — %.2f GiB streamed in %.2fs "
-            "(%.2f GB/s, staging=%s io=%s, %d tensors over %d windows)",
+            "(%.2f GB/s, staging=%s io=%s, %d tensors over %d chunks)",
             pipeline_cls.__name__,
             device,
             report.weights_streamed_bytes / (1 << 30),
@@ -290,7 +284,7 @@ class StreamingLoader:
             report.staging,
             report.io,
             report.tensors,
-            report.windows,
+            report.chunks,
         )
         return built.pipeline
 
@@ -326,13 +320,13 @@ class StreamingLoader:
         self._planned = planned
         return planned
 
-    def _stream_container(
+    def _fill_container(
         self,
         module: Any,
         component: str,
         container: str,
         *,
-        pool: StagingPool,
+        fill_client: FillClient,
         device: Any,
         report: LoadReport,
         compute_dtype: Any = None,
@@ -341,16 +335,16 @@ class StreamingLoader:
     ) -> None:
         import torch
 
-        stream: TensorStream = self._store.open(
+        stream = self._store.open(
             container, direct=self._io == "direct"
         )
-        entries: Sequence[StreamedTensor] = stream.tensors
+        entries = stream.tensors
         if not entries:
             return
 
         slots = _slots(module)
         renames = _keymap.migration(module, (entry.name for entry in entries))
-        placements: List[_Placement] = []
+        destinations: List[Destination] = []
         unexpected: List[str] = []
         seen: set[str] = set()
         dtypes: set[str] = set(report.dtypes)
@@ -366,18 +360,17 @@ class StreamingLoader:
                 continue
             dtype = _torch_dtype(entry.dtype, f"{component}/{entry.name}")
             dtypes.add(entry.dtype.upper())
-            destination = torch.empty(
+            tensor = torch.empty(
                 tuple(int(dim) for dim in entry.shape), dtype=dtype, device=device
             )
-            flat = _flat_bytes(destination)
-            if flat.numel() != entry.nbytes:
+            capacity = int(tensor.numel() * tensor.element_size())
+            if capacity != entry.nbytes:
                 raise LoadError(
                     f"{component}/{entry.name}: the container says "
                     f"{entry.nbytes} bytes, a {dtype} tensor of "
-                    f"{tuple(entry.shape)} holds {flat.numel()}"
+                    f"{tuple(entry.shape)} holds {capacity}"
                 )
-            pool.track(destination)
-            _install(slot, destination)
+            _install(slot, tensor)
             # pgw#1638: a tensor a QUANTIZER owns is out of the lane cast's
             # scope, whatever its dtype. Property 3 above already says a
             # quantized container is the lane's own bytes — but it said it of
@@ -391,12 +384,15 @@ class StreamingLoader:
                     and name not in lane_exempt):
                 recasts.append((slot, f"{component}/{entry.name}", dtype))
             seen.add(entry.name)
-            placements.append(
-                _Placement(
+            destinations.append(
+                Destination(
                     name=entry.name,
-                    offset=int(entry.offset),
-                    nbytes=int(entry.nbytes),
-                    flat=flat,
+                    pointer=int(tensor.data_ptr()),
+                    capacity=capacity,
+                    source_offset=int(entry.offset),
+                    shape=tuple(int(dim) for dim in entry.shape),
+                    element_bytes=int(tensor.element_size()),
+                    layout="torch.contiguous@1",
                 )
             )
 
@@ -419,55 +415,18 @@ class StreamingLoader:
             )
 
         report.dtypes = tuple(sorted(dtypes))
-        placements.sort(key=lambda placement: placement.offset)
-        report.tensors += len(placements)
-        report.windows += self._walk(stream, placements, pool=pool, report=report)
-
-    def _walk(
-        self,
-        stream: TensorStream,
-        placements: List[_Placement],
-        *,
-        pool: StagingPool,
-        report: LoadReport,
-    ) -> int:
-        position = placements[0].offset
-        finish = placements[-1].end
-        window = pool.buffer_bytes
-        first = 0
-        windows = 0
-
-        while position < finish:
-            count = min(window, finish - position)
-            slot = pool.acquire()
-            stream.readinto(position, count, slot.view[:count])
-            windows += 1
-            report.weights_streamed_bytes += count
-
-            index = first
-            while index < len(placements) and placements[index].offset < position + count:
-                placement = placements[index]
-                if placement.end <= position:
-                    index += 1
-                    first = index
-                    continue
-                low = max(placement.offset, position)
-                high = min(placement.end, position + count)
-                pool.copy_out(
-                    slot,
-                    low - position,
-                    placement.flat,
-                    low - placement.offset,
-                    high - low,
+        destinations.sort(key=lambda destination: destination.source_offset)
+        report.tensors += len(destinations)
+        for destination_data in destinations:
+            stats = fill_client.fill(stream, destination_data)
+            if int(stats.source_bytes) != destination_data.capacity:
+                raise LoadError(
+                    f"{component}/{destination_data.name}: tensorfs filled "
+                    f"{stats.source_bytes} source bytes into a "
+                    f"{destination_data.capacity}-byte destination"
                 )
-                if placement.end <= position + count:
-                    first = index + 1
-                index += 1
-
-            pool.release(slot)
-            position += count
-
-        return windows
+            report.weights_streamed_bytes += int(stats.source_bytes)
+            report.chunks += int(stats.chunks)
 
     @staticmethod
     def _cast_to_lane(
@@ -565,6 +524,7 @@ def _lane_compute_dtype(lane: Any) -> Any:
 
 __all__ = [
     "LaneDtypeUnmet",
+    "DEFAULT_STAGING_BYTES",
     "LoadError",
     "LoadReport",
     "NameMismatch",

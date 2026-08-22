@@ -33,6 +33,7 @@ from gen_worker.serving.serve_adoption import ServeAdoption
 FIXTURE_DIR = Path(__file__).parent / "fixtures" / "serving_v2_endpoint"
 LANE = "sdxl.diffusers@1+plain.bf16@1"
 SM = "sm_89"
+BIND_DIGEST = "sha256:" + "b" * 64
 STACK: tuple[tuple[str, str], ...] = (("torch", torch.__version__),)
 ENV = EnvIdentity(stack=STACK, sm=SM)
 OVERRIDES: dict[str, Any] = {"steps": {"default": 2, "lo": 1, "hi": 8}}
@@ -48,6 +49,7 @@ def binding(tmp_path: Path) -> DeployBinding:
     return DeployBinding(
         checkpoint_ref="ckpt:tiny@1", checkpoint_dir=root, model="sdxl",
         defaults=dict(OVERRIDES),
+        bind_contract=SimpleNamespace(digest=BIND_DIGEST),
     )
 
 
@@ -326,10 +328,14 @@ class StubTransport:
         self.answer = answer
         self.asks = 0
 
-    def release_compiled_graphs(self, release_id: str, lane: str, sm: str) -> Any:
+    def bind_compiled_graphs(
+        self, bind_contract_digest: str, lane: str, sm: str
+    ) -> Any:
         self.asks += 1
         if self.answer is None:
-            raise ReleaseNotStamped(f"release {release_id} is not stamped")
+            raise ReleaseNotStamped(
+                f"Bind Contract {bind_contract_digest} is unavailable"
+            )
         return self.answer
 
     def fetch_blob(self, url: str) -> bytes:  # pragma: no cover — all misses
@@ -339,9 +345,9 @@ class StubTransport:
 def all_miss_answer(document: GraphSetDocument) -> dict:
     lane = document.lanes[0]
     return {
-        "object": "release_compiled_graphs",
+        "object": "bind_compiled_graphs",
         "release_id": "release-1",
-        "binding_generation": 0,
+        "bind_contract_digest": BIND_DIGEST,
         "env_compile_stack": [list(row) for row in document.stack],
         "lane": lane.contract,
         "lane_stamped": True,
@@ -377,23 +383,83 @@ def test_the_serve_loop_seam_adopts_from_the_hub_and_arms_the_mint(
     adoption = ServeAdoption(
         "release-1", sm=SM, artifacts_dir=tmp_path / "adopted",
         cas_dir=tmp_path / "podcas", transport=transport, stack=STACK,
-        loader=counting_loader([]), on_adopted=armed.append,
+        loader=counting_loader([]),
+        on_adopted=lambda store, session: armed.append((store, session)),
     )
     loaded = load_endpoint(FIXTURE_DIR)
     (model_cls,) = loaded.models
     lane = loaded.lane(model_cls, LANE)
 
-    sink = adoption.sink_for(model_cls, lane)
+    sink = adoption.sink_for(model_cls, lane, binding)
     assert callable(sink), "the adopt sink is what ctx.compile arms through"
     assert transport.asks == 1
     assert armed == [], "the mint must not be armed before the load runs"
     adoption.loaded(model_cls, lane)
-    assert armed == [adoption], "the post-load hook is the mint's trigger"
+    assert armed == [(adoption.store, adoption.adoption)], (
+        "the post-load hook is the mint's trigger"
+    )
     adoption.loaded(model_cls, lane)
-    assert armed == [adoption], "the trigger fires once, not once per load"
-    assert adoption.sink_for(model_cls, lane) is not None
+    assert armed == [(adoption.store, adoption.adoption)], (
+        "the trigger fires once, not once per load"
+    )
+    assert adoption.sink_for(model_cls, lane, binding) is not None
     assert transport.asks == 1
     assert isinstance(adoption.store, TieredGraphStore)
+
+
+def test_adoption_keys_graphs_by_bind_and_mint_sessions_by_class(
+    binding: DeployBinding, document: GraphSetDocument, tmp_path: Path,
+) -> None:
+    """A second config tree never inherits the first tree's graph answer."""
+
+    second_digest = "sha256:" + "c" * 64
+
+    class PerBindTransport:
+        def __init__(self) -> None:
+            self.asks: List[str] = []
+
+        def bind_compiled_graphs(
+            self, bind_contract_digest: str, lane: str, sm: str
+        ) -> Any:
+            self.asks.append(bind_contract_digest)
+            answer = all_miss_answer(document)
+            answer["bind_contract_digest"] = bind_contract_digest
+            return answer
+
+        def fetch_blob(self, url: str) -> bytes:  # pragma: no cover
+            raise AssertionError(f"all-miss answer fetched {url}")
+
+    class Primary:
+        pass
+
+    class PrimaryTwin:
+        pass
+
+    class Secondary:
+        pass
+
+    transport = PerBindTransport()
+    adoption = ServeAdoption(
+        "release-1",
+        sm=SM,
+        artifacts_dir=tmp_path / "adopted",
+        cas_dir=tmp_path / "podcas",
+        transport=transport,
+        stack=STACK,
+    )
+    lane = LANE
+    assert adoption.sink_for(Primary, lane, binding) is not None
+    assert adoption.sink_for(PrimaryTwin, lane, binding) is not None
+    secondary = DeployBinding(
+        checkpoint_ref=binding.checkpoint_ref,
+        checkpoint_dir=binding.checkpoint_dir,
+        bind_contract=SimpleNamespace(digest=second_digest),
+    )
+    assert adoption.sink_for(Secondary, lane, secondary) is not None
+
+    assert transport.asks == [BIND_DIGEST, second_digest]
+    assert len(adoption._sessions) == 3
+    assert len(adoption._stores) == 2
 
 
 def test_the_production_loop_adopts_on_first_load_and_mints_what_it_missed(
@@ -411,7 +477,8 @@ def test_the_production_loop_adopts_on_first_load_and_mints_what_it_missed(
         def resolve(self, model_cls: type, checkpoint_ref: str) -> DeployBinding:
             return DeployBinding(
                 checkpoint_ref=checkpoint_ref, checkpoint_dir=tree,
-                model="sdxl", defaults=dict(OVERRIDES))
+                model="sdxl", defaults=dict(OVERRIDES),
+                bind_contract=SimpleNamespace(digest=BIND_DIGEST))
 
         def default_pick(self, model_cls: type, slot_name: str) -> str:
             return "ckpt:tiny@1"
@@ -421,10 +488,10 @@ def test_the_production_loop_adopts_on_first_load_and_mints_what_it_missed(
     mints: List[SelfMint] = []
     compiler = FakeCompiler()
 
-    def arm_the_mint(adoption: ServeAdoption) -> None:
-        mint = a_mint(adoption.store, tmp_path, compiler, "loop")
+    def arm_the_mint(store: Any, session: Any) -> None:
+        mint = a_mint(store, tmp_path, compiler, "loop")
         mints.append(mint)
-        mint.arm(adoption)
+        mint.arm(session)
 
     adoption = ServeAdoption(
         "release-1", sm=SM, artifacts_dir=tmp_path / "adopted",
@@ -475,7 +542,13 @@ def test_an_unstamped_release_is_an_eager_pod_with_a_stated_reason(
         transport=StubTransport(None), stack=STACK)
     loaded = load_endpoint(FIXTURE_DIR)
     (model_cls,) = loaded.models
-    assert adoption.sink_for(model_cls, loaded.lane(model_cls, LANE)) is None
+    stamped_binding = DeployBinding(
+        checkpoint_ref="ckpt:tiny@1", checkpoint_dir=tmp_path,
+        bind_contract=SimpleNamespace(digest=BIND_DIGEST),
+    )
+    assert adoption.sink_for(
+        model_cls, loaded.lane(model_cls, LANE), stamped_binding
+    ) is None
     assert "release_not_stamped" in adoption.refusal
     assert adoption.facts() == {"adopting": False, "refusal": adoption.refusal}
     assert [e for e in wire if e[0] == "adopt_refused"]
@@ -486,7 +559,9 @@ def test_a_minted_artifact_the_fleet_cannot_take_is_still_banked_and_stated(
 ) -> None:
     """The upstream publish leg has no worker-side caller at HEAD, so the hub store refuses."""
     local = LocalGraphStore(LocalCAS(tmp_path / "cas"))
-    upstream = HubGraphStore(StubTransport(None), "release-1", LANE, SM)
+    upstream = HubGraphStore(
+        StubTransport(None), "release-1", BIND_DIGEST, LANE, SM
+    )
     store = TieredGraphStore(local, upstream)
     artifact = elf(tmp_path / "one.so")
 
@@ -538,7 +613,8 @@ def test_the_reuse_hit_is_a_wire_fact_a_rental_can_capture(
         def resolve(self, model_cls: type, checkpoint_ref: str) -> DeployBinding:
             return DeployBinding(
                 checkpoint_ref=checkpoint_ref, checkpoint_dir=tree,
-                model="sdxl", defaults=dict(OVERRIDES))
+                model="sdxl", defaults=dict(OVERRIDES),
+                bind_contract=SimpleNamespace(digest=BIND_DIGEST))
 
         def default_pick(self, model_cls: type, slot_name: str) -> str:
             return "ckpt:tiny@1"
@@ -547,10 +623,10 @@ def test_the_reuse_hit_is_a_wire_fact_a_rental_can_capture(
     mints: List[SelfMint] = []
 
     def boot(tag: str, compiler: FakeCompiler) -> ServeAdoption:
-        def arm(adoption: ServeAdoption) -> None:
-            mint = a_mint(adoption.store, tmp_path, compiler, tag)
+        def arm(store: Any, session: Any) -> None:
+            mint = a_mint(store, tmp_path, compiler, tag)
             mints.append(mint)
-            mint.arm(adoption)
+            mint.arm(session)
 
         adoption = ServeAdoption(
             "release-1", sm=SM, artifacts_dir=tmp_path / f"adopted-{tag}",

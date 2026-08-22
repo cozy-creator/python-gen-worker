@@ -1,15 +1,14 @@
-"""The wire's snapshot map is keyed by COMPOSED MANIFEST DIGEST: ModelBinding carries manifest_digest, and DesiredResidency.snapshots / RunJob.snapshots are keyed by it, so two resolutions of one repo with different component sources are two entries that cannot interfere. The worker's residency, event and GC key is still the canonical ref, so this module is the ONE place the two spellings meet — it resolves each binding's manifest_digest to its snapshot and files it under that binding's ref. A ref that two bindings claim at DIFFERENT digests is refused, never guessed."""
+"""Convert Tensorhub's ref-keyed snapshot wire map into worker objects.
+
+``ModelBinding.manifest_digest`` never had a sender and is tombstoned by
+th#2208.  A snapshot map key is therefore the canonical ref on both sides of
+the wire; there is no second spelling to reconcile here.
+"""
 
 from __future__ import annotations
 
-from typing import Any, Dict, Iterable, Mapping
-
-from .api.errors import ValidationError
+from typing import Any, Dict, Mapping
 from .models.refs import WireRef
-
-
-class AmbiguousManifestError(ValidationError):
-    """One ref arrived bound to two different composed manifests in a single message."""
 
 
 def resolved_repo_from_snapshot(snap: Any) -> Any:
@@ -70,48 +69,22 @@ def snapshot_from_resolved_repo(resolved: Any) -> Any:
 
 def resolved_repos(
     wire: Mapping[str, Any],
-    bindings: Iterable[Any] = (),
 ) -> Dict[str, Any]:
-    """:func:`index_snapshots`, with every entry already converted to the typed ``WorkerResolvedRepo``."""
+    """Return every ref with its typed ``WorkerResolvedRepo``."""
     return {
         str(ref): resolved_repo_from_snapshot(snap)
-        for ref, snap in index_snapshots(wire, bindings).items()
+        for ref, snap in wire.items()
     }
 
 
 def index_snapshots(
     wire: Mapping[str, Any],
-    bindings: Iterable[Any] = (),
 ) -> Dict[WireRef, Any]:
     """Wire snapshot map -> the ref-keyed view the worker materializes from."""
-    claimed: set[str] = set()
-    out: Dict[WireRef, Any] = {}
-    seen: Dict[str, str] = {}
-    for binding in bindings or ():
-        ref = str(getattr(binding, "ref", "") or "").strip()
-        digest = str(getattr(binding, "manifest_digest", "") or "").strip()
-        if not ref or not digest:
-            continue
-        prior = seen.get(ref)
-        if prior is not None and prior != digest:
-            raise AmbiguousManifestError(
-                f"ref {ref!r} is bound to two composed manifests in one "
-                f"message ({prior} and {digest}); the hub must send one "
-                f"manifest per ref per message"
-            )
-        seen[ref] = digest
-        claimed.add(digest)
-        snapshot = wire.get(digest)
-        if snapshot is not None:
-            out[WireRef(ref)] = snapshot
-    for key, snapshot in wire.items():
-        if key not in claimed:
-            out.setdefault(WireRef(key), snapshot)
-    return out
+    return {WireRef(ref): snapshot for ref, snapshot in wire.items()}
 
 
 __all__ = [
-    "AmbiguousManifestError",
     "index_snapshots",
     "resolved_repo_from_snapshot",
     "resolved_repos",

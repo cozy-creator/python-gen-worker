@@ -132,12 +132,18 @@ class DeployBinding:
     lane_trees: Mapping[str, Path] = field(default_factory=dict)
     lane_verdicts: Mapping[str, str] = field(default_factory=dict)
     lane_bytes: Mapping[str, int] = field(default_factory=dict)
+    # pgw#1653: the exact Bind Contract selected for this config tree. The
+    # object owns its census and portable bind identity; the reporter records
+    # a typed mismatch against that identity before load refuses.
+    bind_contract: Any = None
+    bind_refusal_reporter: Optional[Callable[[Any, Any], None]] = None
 
 
 class LoaderEngine(Protocol):
 
     def build(
-        self, pipeline_cls: type, *, checkpoint_dir: Path, lane: Any
+        self, pipeline_cls: type, *, checkpoint_dir: Path, lane: Any,
+        expected_census: Any = None,
     ) -> Any: ...
 
 
@@ -393,11 +399,7 @@ class LoadContext(Generic[MT_co]):
     def load(self, pipeline_cls: Type[P]) -> P:
         """Build ``pipeline_cls`` with this checkpoint's weights resident."""
         if self._engine is not None:
-            built: P = self._engine.build(
-                pipeline_cls,
-                checkpoint_dir=self.checkpoint_dir,
-                lane=self._lane,
-            )
+            built: P = self._streaming_build(self._engine, pipeline_cls)
             return built
         from_pretrained = getattr(pipeline_cls, "from_pretrained", None)
         if from_pretrained is None:
@@ -426,11 +428,7 @@ class LoadContext(Generic[MT_co]):
             if bound:
                 engine = self._engine
                 assert engine is not None
-                rebound: P = engine.build(
-                    pipeline_cls,
-                    checkpoint_dir=self.checkpoint_dir,
-                    lane=self._lane,
-                )
+                rebound: P = self._streaming_build(engine, pipeline_cls)
                 return rebound
             raise ProjectedTreeNotStreamable(
                 self.checkpoint_dir,
@@ -464,6 +462,37 @@ class LoadContext(Generic[MT_co]):
         if callable(to):
             to(dtype)
         return self._placed(loaded)
+
+    def _streaming_build(self, engine: LoaderEngine, pipeline_cls: Type[P]) -> P:
+        contract = self._binding.bind_contract
+        if contract is None:
+            raise RuntimeError(
+                f"ctx.load({pipeline_cls.__name__}): no Bind Contract was "
+                "resolved for this checkpoint tree. The construction census "
+                "is a required serve input under pgw#1653; absence never "
+                "falls back to comparing the module with itself."
+            )
+        try:
+            return cast(P, engine.build(
+                pipeline_cls,
+                checkpoint_dir=self.checkpoint_dir,
+                lane=self._lane,
+                expected_census=contract.census,
+            ))
+        except Exception as exc:
+            from .streaming.census import CensusMismatch
+
+            if isinstance(exc, CensusMismatch):
+                reporter = self._binding.bind_refusal_reporter
+                if reporter is not None:
+                    try:
+                        reporter(contract, exc)
+                    except Exception:
+                        logger.exception(
+                            "bind contract mismatch report failed; the load "
+                            "still refuses against %s", contract.digest,
+                        )
+            raise
 
     def _placed(self, pipeline: P) -> P:
         if not self._device:

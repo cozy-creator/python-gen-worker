@@ -110,9 +110,9 @@ ACTIONS: Dict[str, HubAction] = {
             timeout_s=60.0,
         ),
         _a(
-            "release.compiled_graphs",
+            "bind.compiled_graphs",
             "GET",
-            r"^/v1/worker/releases/[A-Za-z0-9._+-]{1,128}/compiled-graphs$",
+            r"^/v1/worker/bind-contracts/sha256:[0-9a-f]{64}/compiled-graphs$",
             query=("lane", "sm"),
             timeout_s=30.0,
         ),

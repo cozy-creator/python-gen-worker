@@ -91,7 +91,9 @@ def test_the_release_document_carries_the_census_in_th2281_s_ENVELOPE_pgw1647(
         lockfile=lockfile,
     )
     document = json.loads(result.document)
-    row = document["construction_census"]
+    (tree_row,) = document["construction_censuses"]
+    assert tree_row["owners"] == ["$primary"]
+    row = tree_row["census"]
     assert row["v"] == census.CENSUS_VERSION
     assert row["kind"] == census.CENSUS_KIND
     assert row["pipeline_class"] == "StableDiffusionPipeline"
@@ -109,14 +111,15 @@ def test_the_release_document_carries_the_census_in_th2281_s_ENVELOPE_pgw1647(
     assert parsed.tensor_count > 0
     for component in parsed.components:
         assert component.eval_mode is True, component.component
-    assert result.census_components == ("text_encoder", "unet", "vae")
-    assert result.census_absent == ""
+    assert "construction_census" not in document, (
+        "the deleted primary-only field survived the per-tree hardcut"
+    )
 
 
 def test_the_census_is_LANE_INVARIANT_and_says_so_pgw1647(
     config_only_tree: Path, lockfile: Path
 ) -> None:
-    """ONE census per release, not one per lane — and the reason is in the row.
+    """ONE census per config tree, not one per lane — and the reason is in the row.
 
     A lane's only effect on construction is the dtype it casts wide floats to,
     and that fact already has a precise owner (the lane contract, and
@@ -132,7 +135,8 @@ def test_the_census_is_LANE_INVARIANT_and_says_so_pgw1647(
         lockfile=lockfile,
     )
     document = json.loads(result.document)
-    parsed = census.Census.from_document(document["construction_census"])
+    parsed = census.Census.from_document(
+        document["construction_censuses"][0]["census"])
     unet = parsed.by_component()["unet"]
 
     dtypes = {row.dtype for row in unet.tensors}
@@ -239,7 +243,7 @@ def test_the_release_census_verifies_the_module_the_serve_path_builds_pgw1647(
         lockfile=lockfile,
     )
     published = census.Census.from_document(
-        json.loads(result.document)["construction_census"])
+        json.loads(result.document)["construction_censuses"][0]["census"])
 
     import torch
 
