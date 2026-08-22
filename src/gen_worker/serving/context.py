@@ -473,12 +473,12 @@ class LoadContext(Generic[MT_co]):
                 "falls back to comparing the module with itself."
             )
         try:
-            return engine.build(
+            return cast(P, engine.build(
                 pipeline_cls,
                 checkpoint_dir=self.checkpoint_dir,
                 lane=self._lane,
                 expected_census=contract.census,
-            )
+            ))
         except Exception as exc:
             from .streaming.census import CensusMismatch
 

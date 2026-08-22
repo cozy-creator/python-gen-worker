@@ -196,7 +196,7 @@ class ServeAdoption:
             else BrokerReleaseGraphTransport()
         )
         store = self._stores.get(bind_key)
-        upstream = (
+        upstream: Any = (
             getattr(store, "upstream", None)
             if store is not None
             else HubGraphStore(
@@ -207,16 +207,16 @@ class ServeAdoption:
             document = upstream.get_graphs(self.release_id)
         except ReleaseNotStamped as exc:
             self._refuse("release_not_stamped", str(exc))
-            return
+            return None
         if document is None:
             self._refuse(
                 "no_document",
                 "the adopt route answered, and the answer rebuilt to no lane "
                 "document for this (release x lane x sm)")
-            return
+            return None
         if getattr(document, "eager_permanent", False):
             self._refuse("eager_permanent", "the release document is eager-permanent")
-            return
+            return None
         stack = self._stack if self._stack is not None else dict(document.stack)
         for row in installed_stack_drift(dict(document.stack)):
             logger.warning("adopt: compile-stack drift vs this venv: %s", row)
@@ -226,7 +226,7 @@ class ServeAdoption:
                 "this worker states no local CAS, so a fetched artifact could "
                 "not be banked and a minted one could not be published — the "
                 "adopt would be read-only against the fleet pool forever")
-            return
+            return None
         if store is None:
             store = graph_store(self.cas_dir, upstream)
         session = AdoptSession(
