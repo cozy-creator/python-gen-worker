@@ -369,6 +369,36 @@ def test_model_header_declarations_and_refusals() -> None:
 
     assert model_marks_compile(EagerReadable) is False
 
+    # A `load()` with NO SOURCE AT ALL is its own refusal with its own
+    # sentence. The first pgw#1655 refusal told this class it "hands the LOAD
+    # CONTEXT away" — it does not even name `ctx` — and a refusal that
+    # misnames its cause sends the reader to the wrong line.
+    sourceless = (
+        "class Sourceless(Model[SDXL], lanes=LANES):\n"
+        "    def load(self, ctx):\n"
+        "        self.pipe = object()\n"
+    )
+    with pytest.raises(ModelDeclarationError, match="no readable source"):
+        exec(  # noqa: S102 - a header with no file is the thing under test
+            sourceless,
+            {"Model": Model, "SDXL": SDXL, "LANES": {_sdxl_contract(): _lane()}},
+        )
+
+    # …and the same header IS readable once its source can be found, which is
+    # the falsifier for the arm above: it is the missing SOURCE that refuses,
+    # not the `exec`.
+    import linecache
+
+    where = "<pgw1655-sourceless-falsifier>"
+    linecache.cache[where] = (
+        len(sourceless), None, sourceless.splitlines(keepends=True), where
+    )
+    seen: dict[str, Any] = {
+        "Model": Model, "SDXL": SDXL, "LANES": {_sdxl_contract(): _lane()},
+    }
+    exec(compile(sourceless, where, "exec"), seen)  # noqa: S102
+    assert model_marks_compile(seen["Sourceless"]) is False
+
     with pytest.raises(LaneDeclarationError, match="at least TWO variant"):
         class OneVariant(
             Model[SDXL],

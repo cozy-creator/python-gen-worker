@@ -199,6 +199,9 @@ def load_compile_mark(definition: Any) -> CompileMark:
     return CompileMark(UNMARKED)
 
 
+SOURCELESS = "sourceless"
+
+
 def _read_load(fn: Any) -> CompileMark:
     """:func:`load_compile_mark` over a LIVE ``load``, via its own source."""
 
@@ -207,11 +210,11 @@ def _read_load(fn: Any) -> CompileMark:
     try:
         source = textwrap.dedent(inspect.getsource(fn))
     except (OSError, TypeError):
-        return CompileMark(UNREADABLE, 0, "its source is not on disk to read")
+        return CompileMark(SOURCELESS)
     try:
         tree = ast.parse(source)
     except SyntaxError:  # pragma: no cover - dedent of a nested def
-        return CompileMark(UNREADABLE, 0, "its source does not parse alone")
+        return CompileMark(SOURCELESS)
     definition = tree.body[0] if tree.body else None
     return load_compile_mark(definition)
 
@@ -230,8 +233,25 @@ def _class_compile_mark(cls: type) -> CompileMark:
 
 
 def _refuse_unreadable_mark(cls: type, mark: CompileMark) -> None:
-    """State the one answer the platform cannot read, at the site that owns it."""
+    """State the one answer the platform cannot read, at the site that owns it.
 
+    TWO causes, and they get DIFFERENT sentences (pgw#1655 follow-up). The
+    first refusal shipped one message for both and told a class whose `load`
+    simply had no file that it "hands the LOAD CONTEXT away", which it did
+    not. A refusal that misnames its cause sends the reader to the wrong line.
+    """
+
+    if mark.state == SOURCELESS:
+        raise ModelDeclarationError(
+            f"{cls.__qualname__}: `load()` has no readable source, so whether "
+            f"this class marks a compile target cannot be read — and it is "
+            f"not guessed (pgw#1655). Every model class an endpoint ships is "
+            f"defined in a module ON DISK, which is the only thing the "
+            f"release derive can import; a class built by `exec()` or "
+            f"`type()` could never be a release subject anyway. Define it in "
+            f"a real module — or, in a test rig, `compile()` the source with "
+            f"a filename and seed `linecache` so the header stays readable."
+        )
     where = f" (line {mark.lineno}: `{mark.spelling}`)" if mark.lineno else ""
     raise ModelDeclarationError(
         f"{cls.__qualname__}: `load()` hands the LOAD CONTEXT itself "
@@ -537,7 +557,7 @@ class Model(Generic[MT]):
         # mark is refused HERE, where the author can make it readable,
         # instead of being answered "no" at both call sites.
         mark = _class_compile_mark(cls)
-        if mark.state == UNREADABLE:
+        if mark.state in (UNREADABLE, SOURCELESS):
             _refuse_unreadable_mark(cls, mark)
         marks_compile = mark.marked
 

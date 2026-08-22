@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import linecache
 import types
 
 import pytest
@@ -164,11 +165,23 @@ def _marked_model(reason="bespoke pipeline.json loader; ctx.load drives neither 
     from gen_worker.serving.model import Model
 
     namespace = {"Model": Model, "Trellis2": Trellis2, "LANES": _TRELLIS_LANES}
-    exec(  # noqa: S102 - the class header IS the thing under test
+    source = (
         "class Marked(Model[Trellis2], lanes=LANES, self_loading=%r):\n"
         "    def load(self, ctx):\n"
-        "        self.pipe = object()\n" % reason,
-        namespace,
+        "        self.pipe = object()\n" % reason
+    )
+    # pgw#1655: the header is READ, so it has to stay readable. `exec` of a
+    # bare string leaves `load` with no source at all — `inspect.getsource`
+    # raises, compile subjecthood cannot be stated, and a class header the
+    # platform cannot read is a refusal, not an eager declaration. Seeding
+    # linecache under a synthetic filename is what a real module gets for
+    # free.
+    filename = "<pgw1655-marked-model>"
+    linecache.cache[filename] = (
+        len(source), None, source.splitlines(keepends=True), filename
+    )
+    exec(  # noqa: S102 - the class header IS the thing under test
+        compile(source, filename, "exec"), namespace
     )
     return namespace["Marked"]
 
