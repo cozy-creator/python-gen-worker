@@ -194,12 +194,16 @@ class FakeScheduler(pb_grpc.WorkerSchedulerServicer):
     def __init__(
         self, *, reject_unauthenticated: bool = False,
         file_base_url: str = "http://127.0.0.1:1/files",
+        hello_ack: Optional[Callable[[pb.Hello], pb.HelloAck]] = None,
     ) -> None:
         self.connections: List[Conn] = []
         self.diagnostic_reports: List[pb.HardwareUnsuitable] = []
         self._conn_cond = threading.Condition()
         self.reject_unauthenticated = reject_unauthenticated
         self.file_base_url = file_base_url
+        #: Lets a test author the HelloAck the way the real hub would — the
+        #: DesiredStateCommand the worker owes a GoalReceipt for lives there.
+        self.hello_ack = hello_ack
         self.worker_alive: Optional[Callable[[], bool]] = None
         self.boot_cost: Optional[Callable[[], float]] = None
 
@@ -222,10 +226,14 @@ class FakeScheduler(pb_grpc.WorkerSchedulerServicer):
         conn.hello = first.hello
         conn.boot_cost = self.boot_cost
         conn.diagnostic_reports = self.diagnostic_reports
-        conn.send(hello_ack=pb.HelloAck(
-            protocol_version=pb.PROTOCOL_VERSION_CURRENT,
-            file_base_url=self.file_base_url,
-        ))
+        if self.hello_ack is not None:
+            ack = self.hello_ack(first.hello)
+        else:
+            ack = pb.HelloAck(
+                protocol_version=pb.PROTOCOL_VERSION_CURRENT,
+                file_base_url=self.file_base_url,
+            )
+        conn.send(hello_ack=ack)
         with self._conn_cond:
             self.connections.append(conn)
             self._conn_cond.notify_all()
@@ -302,12 +310,14 @@ class WorkerHarness:
         gpu_slots: int = 1,
         backoff_base_s: float = 0.05,
         backoff_cap_s: float = 0.2,
+        release_id: str = "",
     ) -> None:
         self.scheduler = scheduler
         settings = load_settings(
             orchestrator_public_addr=f"127.0.0.1:{port}",
             worker_id=worker_id,
             worker_jwt="",
+            worker_release_id=release_id,
             tensorhub_cache_dir=str(cache_dir),
         )
         self.worker = Worker(
@@ -371,11 +381,15 @@ def hub_double(
     max_workers: int = 16,
     cache_dir: Optional[Path] = None,
     file_base_url: str = "http://127.0.0.1:1/files",
+    release_id: str = "",
+    hello_ack: Optional[Callable[[pb.Hello], pb.HelloAck]] = None,
 ) -> Iterator[Tuple[FakeScheduler, WorkerHarness]]:
     """Stand up one hub-double gRPC server + one real Worker against it."""
     prior_env = os.environ.get("TENSORHUB_CACHE_DIR")
+    prior_config_path = os.environ.get("GEN_WORKER_CONFIG_SNAPSHOT_PATH")
     scheduler = FakeScheduler(
         reject_unauthenticated=reject_unauthenticated, file_base_url=file_base_url,
+        hello_ack=hello_ack,
     )
     server = grpc.server(futures.ThreadPoolExecutor(max_workers=max_workers))
     pb_grpc.add_WorkerSchedulerServicer_to_server(scheduler, server)
@@ -384,11 +398,18 @@ def hub_double(
     with tempfile.TemporaryDirectory(prefix="pgw-hub-double-cache-") as tmp:
         resolved_cache_dir = cache_dir or Path(tmp)
         os.environ["TENSORHUB_CACHE_DIR"] = str(resolved_cache_dir)
+        # th#1087's durable config snapshot: production injects this at pod
+        # launch and privdrop grants its directory; a rig that leaves it unset
+        # writes to /app and every config-generation push fails.
+        os.environ["GEN_WORKER_CONFIG_SNAPSHOT_PATH"] = str(
+            resolved_cache_dir / "runtime_config.msgpack"
+        )
         gw_config.reload_for_test()
         harness = WorkerHarness(
             scheduler, port, cache_dir=resolved_cache_dir,
             modules=modules, worker_id=worker_id, gpu_slots=gpu_slots,
             backoff_base_s=backoff_base_s, backoff_cap_s=backoff_cap_s,
+            release_id=release_id,
         )
         scheduler.worker_alive = lambda: harness.alive
         harness.start()
@@ -397,10 +418,14 @@ def hub_double(
         finally:
             harness.stop()
             server.stop(grace=0)
-            if prior_env is None:
-                os.environ.pop("TENSORHUB_CACHE_DIR", None)
-            else:
-                os.environ["TENSORHUB_CACHE_DIR"] = prior_env
+            for name, prior in (
+                ("TENSORHUB_CACHE_DIR", prior_env),
+                ("GEN_WORKER_CONFIG_SNAPSHOT_PATH", prior_config_path),
+            ):
+                if prior is None:
+                    os.environ.pop(name, None)
+                else:
+                    os.environ[name] = prior
             gw_config.reload_for_test()
 
 
@@ -417,6 +442,7 @@ def custom_scheduler_server(
 ) -> Iterator[Tuple[Any, WorkerHarness, int]]:
     """Like ``hub_double()`` but for a BESPOKE ``WorkerSchedulerServicer`` (auth-reject/precondition/redirect/stall scenarios) instead of the ordinary ``FakeScheduler``."""
     prior_env = os.environ.get("TENSORHUB_CACHE_DIR")
+    prior_config_path = os.environ.get("GEN_WORKER_CONFIG_SNAPSHOT_PATH")
     servicer = servicer_factory()
     server = grpc.server(futures.ThreadPoolExecutor(max_workers=max_workers))
     pb_grpc.add_WorkerSchedulerServicer_to_server(servicer, server)
@@ -424,6 +450,9 @@ def custom_scheduler_server(
     server.start()
     with tempfile.TemporaryDirectory(prefix="pgw-hub-double-cache-") as tmp:
         os.environ["TENSORHUB_CACHE_DIR"] = tmp
+        os.environ["GEN_WORKER_CONFIG_SNAPSHOT_PATH"] = str(
+            Path(tmp) / "runtime_config.msgpack"
+        )
         gw_config.reload_for_test()
         harness = WorkerHarness(
             servicer, bound_port, cache_dir=Path(tmp), modules=modules, worker_id=worker_id,
@@ -435,10 +464,14 @@ def custom_scheduler_server(
         finally:
             harness.stop()
             server.stop(grace=0)
-            if prior_env is None:
-                os.environ.pop("TENSORHUB_CACHE_DIR", None)
-            else:
-                os.environ["TENSORHUB_CACHE_DIR"] = prior_env
+            for name, prior in (
+                ("TENSORHUB_CACHE_DIR", prior_env),
+                ("GEN_WORKER_CONFIG_SNAPSHOT_PATH", prior_config_path),
+            ):
+                if prior is None:
+                    os.environ.pop(name, None)
+                else:
+                    os.environ[name] = prior
             gw_config.reload_for_test()
 
 

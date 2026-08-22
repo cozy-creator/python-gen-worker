@@ -8,7 +8,8 @@ import os
 import time
 import uuid
 from collections import OrderedDict
-from typing import Any, Awaitable, Callable, Iterable, Optional, TypeVar
+from dataclasses import dataclass, field
+from typing import Any, Awaitable, Callable, Iterable, Mapping, Optional, TypeVar
 
 from .config.settings import BOOT_CONFIG_GENERATION_ABSENT
 from .pb import worker_scheduler_pb2 as pb
@@ -82,6 +83,45 @@ class UnreportedIntentWait(RuntimeError):
     """A protocol-owned await outlived the reporting grace period."""
 
 
+@dataclass(frozen=True)
+class CapabilityFacts:
+    """What a v2 worker knows about itself, in the shape the capability projection consumes.
+
+    The v1 ``Executor`` this projection used to read is DELETED (#1373). Three of
+    its six inputs had no v2 equivalent, so the projection takes a stated record
+    instead of an object it introspects — one producer per field, and a caller
+    that cannot silently supply half of one.
+    """
+
+    #: The generation the hub's config push advertised (DesiredResidency /
+    #: DesiredStateCommand ``config_generation``). 0 = none pushed yet.
+    config_generation: int = 0
+    #: The generation whose parameter snapshot this process has durably written.
+    parameter_snapshot_generation: int = 0
+    #: The generation whose desired BINDINGS (the hub's checkpoint residency for
+    #: this release) this process has finished reconciling. Without it the config
+    #: application never converges, every capability stays APPLYING, and a typed
+    #: release cannot be dispatched to at all.
+    binding_ready_generation: int = 0
+    #: Functions this worker can serve RIGHT NOW.
+    available: frozenset[str] = frozenset()
+    #: Functions this worker has declared it cannot serve.
+    unavailable: frozenset[str] = frozenset()
+    #: function name -> the hub's own DesiredInstance for it. The binding digest
+    #: the hub compares against is derived from THIS message.
+    hot: Mapping[str, "pb.DesiredInstance"] = field(default_factory=dict)
+    #: model ref -> its residency record on this worker.
+    residency: Mapping[str, "pb.ModelResidency"] = field(default_factory=dict)
+    #: model ref -> the execution lane the HUB resolved for it
+    #: (``HelloAck.resolutions[].lane``). Never this worker's own ladder pick:
+    #: the hub compares the capability's lane to the lane IT projected.
+    lanes: Mapping[str, str] = field(default_factory=dict)
+    #: function name -> "eager" | "compiled" for a READY capability.
+    serving_tiers: Mapping[str, str] = field(default_factory=dict)
+    #: function name -> compile-target incarnation id.
+    compile_targets: Mapping[str, str] = field(default_factory=dict)
+
+
 class IntentRegistry:
     """Current desired intents, legal transitions, and bounded reconnect state."""
 
@@ -105,7 +145,8 @@ class IntentRegistry:
         self._state_seq = 1
         self._updated_at_ms = _now_ms()
         self._last_command_seq = 0
-        self._last_command_digest = b""
+        self._last_goal_id = ""
+        self._command_binding_digests: dict[str, bytes] = {}
         self._last_receipt: Optional[pb.GoalReceipt] = None
         self._command_receipts: "OrderedDict[tuple[int, bytes], pb.GoalReceipt]" = OrderedDict()
         self._target_config_generation = 0
@@ -251,9 +292,17 @@ class IntentRegistry:
             )
         elif (
             int(command.command_seq) == self._last_command_seq
-            and self._last_command_digest
-            and digest != self._last_command_digest
+            and self._last_goal_id
+            and str(command.goal_id or "").strip() != self._last_goal_id
         ):
+            # KEYED ON goal_id, NOT ON THE COMMAND DIGEST (#1660). The hub keys
+            # same-seq identity on (goal_id, release_id) itself
+            # (`applyGoalReceiptLocked`), and a digest comparison rejects a
+            # perfectly legal RE-STATEMENT of the same goal: `config_digest` is
+            # empty on the first HelloAck of a boot and filled in on the
+            # reconnect after, at the SAME command_seq. That reads as a conflict,
+            # costs the ACCEPTED receipt for the current command, and starves
+            # every dispatch on the release from the first reconnect onward.
             command_errors.append(
                 (
                     "",
@@ -269,14 +318,18 @@ class IntentRegistry:
                     "config_generation regressed",
                 )
             )
-        if int(command.config_generation) > 0 and not bytes(command.config_digest):
-            command_errors.append(
-                (
-                    "",
-                    pb.LIFECYCLE_ERROR_CODE_MISSING_MANDATORY_FIELD,
-                    "config_digest is required when config_generation is set",
-                )
-            )
+        # NO `config_digest is required when config_generation is set` RULE.
+        # It reads like a mandatory-field check and is in fact a dispatch starve
+        # on every fresh boot (#1660). The hub builds the command with
+        # `protocolConfigDigest(resolutionCfg)`, and `resolutionCfg` is legitimately
+        # nil on the FIRST HelloAck of a boot — a build error, a discarded stale
+        # build, or simply no provider yet (`hello_ack.go`) — while
+        # `config_generation` comes from the worker's already-persisted
+        # DesiredResidency and is > 0. Rejecting that pair costs the ACCEPTED
+        # receipt, and no accepted receipt for the CURRENT command is
+        # `exact_goal_receipt_not_accepted`: nothing on the release is
+        # dispatchable. An absent digest is the hub saying it has no config to
+        # describe, never a malformed command.
         if int(command.config_generation) > 0 and not bytes(command.parameter_snapshot):
             command_errors.append(
                 (
@@ -321,14 +374,12 @@ class IntentRegistry:
                     )
                 )
             kind = int(intent.kind)
-            if int(intent.cause) == pb.DESIRED_INTENT_CAUSE_UNSPECIFIED:
-                command_errors.append(
-                    (
-                        intent_id,
-                        pb.LIFECYCLE_ERROR_CODE_MISSING_MANDATORY_FIELD,
-                        "intent cause is required",
-                    )
-                )
+            # NO `cause is required` RULE. `DesiredIntentCause` is provenance
+            # telemetry — nothing the worker does with an intent depends on it —
+            # and the intent carrying it is often the ONE mandatory CONFIG_APPLY,
+            # where declining latches `protocol_rejected` and bricks the process.
+            # Refusing work over a missing label is the same defect class as the
+            # `config_digest` rule this issue deleted.
             if kind not in _SUPPORTED_INTENT_KINDS:
                 command_errors.append(
                     (
@@ -483,7 +534,14 @@ class IntentRegistry:
                 self._intents[intent_id] = declined_state
         self._trim_intents()
         self._last_command_seq = int(command.command_seq)
-        self._last_command_digest = digest
+        self._last_goal_id = str(command.goal_id or "").strip()
+        self._command_binding_digests = {
+            str(intent.function_name or "").strip(): bytes(intent.binding_digest)
+            for intent in command.intents
+            if int(intent.kind) == pb.DESIRED_INTENT_KIND_FUNCTION_READY
+            and str(intent.function_name or "").strip()
+            and bytes(intent.binding_digest)
+        }
         changed_classes = (
             command.changed_config_classes if command.HasField("changed_config_classes") else None
         )
@@ -504,6 +562,26 @@ class IntentRegistry:
             received_at_unix_ms=now,
             command_digest=digest,
         )
+        # A RE-STATEMENT of the same goal at the same seq answers with the
+        # receipt the hub ALREADY HOLDS, byte for byte. The command still
+        # applied in full above — only the answer is stabilised. The hub keys
+        # receipt identity on `command_seq` and refuses a second one at that seq
+        # that is not `proto.Equal` ("goal receipt command_seq conflict"), and a
+        # fresh `received_at_unix_ms` alone is enough to differ. That books a
+        # `worker_protocol_rejected` row on the FIRST reconnect of every pod
+        # whose boot HelloAck carried no `config_digest` — harmless to dispatch,
+        # since the hub keeps the older accepted receipt, and still a rejection
+        # row on a fleet whose acceptance bar is ZERO of them.
+        prior = self._receipts.get(command.goal_id)
+        if (
+            prior is not None
+            and int(prior.command_seq) == int(command.command_seq)
+            and int(prior.status) == pb.GOAL_RECEIPT_STATUS_ACCEPTED
+            and str(prior.release_id) == str(command.release_id)
+            and [(r.intent_id, int(r.error_code)) for r in prior.rejections]
+            == [(r.intent_id, int(r.error_code)) for r in receipt.rejections]
+        ):
+            receipt = _clone(prior)
         self._touch()
         self._remember_receipt(receipt)
         self._remember_command_receipt(
@@ -1040,38 +1118,48 @@ class IntentRegistry:
             return
         self._advance_config_target(gen, changed_classes)
 
-    def refresh_projection(
-        self,
-        executor: Any,
-        desired: Optional["pb.DesiredResidency"],
-        resolutions: dict[str, tuple[Any, ...]],
-    ) -> None:
+    def binding_digest(self, function_name: str, instance: Optional["pb.DesiredInstance"]) -> bytes:
+        """The digest the hub compares a READY capability against.
+
+        Preferred source is the hub's OWN ``FUNCTION_READY`` intent, byte for
+        byte: `workerHasExactReadyCapabilityLocked` does `bytes.Equal` against
+        that field, so echoing it can never disagree with the hub, while
+        re-deriving it can (a marshalling difference on either side is a silent
+        `exact_binding_digest_mismatch` — dispatch starve, not an error). The
+        derivation stays as the fallback for a function the current command
+        names no ready intent for.
+
+        Read off the COMMAND, deliberately, not off this registry's intent
+        bookkeeping. "The hub says function F binds to digest X" is true whether
+        or not the intent carrying it was accepted, superseded or trimmed at the
+        128-intent bound — and a function whose binding changed would otherwise
+        fall back to the derivation permanently, which is the silent mismatch
+        this echo exists to prevent.
+        """
+        stated = self._command_binding_digests.get(function_name)
+        if stated:
+            return stated
+        return _binding_digest(function_name, instance)
+
+    def refresh_projection(self, facts: "CapabilityFacts") -> None:
         """Project exact capabilities and proven parameter snapshot state."""
-        parameter_generation = int(
-            getattr(executor.runtime_config, "parameter_snapshot_generation", 0)
-        )
+        parameter_generation = int(facts.parameter_snapshot_generation)
         if parameter_generation > int(self._config_application.parameter_snapshot_generation):
             self.config_snapshot_applied(parameter_generation)
+        binding_generation = int(facts.binding_ready_generation)
+        if binding_generation > int(self._config_application.binding_ready_generation):
+            self.bindings_applied(binding_generation)
         if not self.release_id:
             capabilities: list[pb.FunctionCapability] = []
         else:
-            hot = {
-                instance.function_name: instance
-                for instance in (desired.hot if desired is not None else ())
-                if instance.function_name
-            }
-            residency = {model.ref: model for model in executor.store.residency_snapshot()}
-            available = set(executor.available_functions())
-            compile_targets = {
-                name: target.incarnation_id
-                for target in executor.compile_targets()
-                for name in target.function_names
-            }
-            tiers_fn = getattr(executor, "serving_tiers", None)
-            tiers: dict[str, str] = tiers_fn() if callable(tiers_fn) else {}
+            hot = facts.hot
+            residency = facts.residency
+            available = set(facts.available)
+            compile_targets = facts.compile_targets
+            tiers = facts.serving_tiers
             config_state = int(self._config_application.state)
             target_generation = int(
-                self._config_application.target_generation or executor.runtime_config.generation
+                self._config_application.target_generation or facts.config_generation
             )
             capabilities = []
             for name in sorted(self.function_names):
@@ -1081,9 +1169,9 @@ class IntentRegistry:
                 )
                 execution_lanes = sorted(
                     {
-                        resolutions.get(ref, ("", "", ""))[2]
+                        facts.lanes[ref]
                         for ref in model_refs
-                        if resolutions.get(ref, ("", "", ""))[2]
+                        if str(facts.lanes.get(ref, "") or "")
                     }
                 )
                 if config_state == pb.CONFIG_APPLICATION_STATE_FAILED:
@@ -1096,7 +1184,7 @@ class IntentRegistry:
                     state = pb.FUNCTION_CAPABILITY_STATE_APPLYING
                 elif name in available:
                     state = pb.FUNCTION_CAPABILITY_STATE_READY
-                elif name in executor.unavailable:
+                elif name in facts.unavailable:
                     state = pb.FUNCTION_CAPABILITY_STATE_FAILED
                 else:
                     state = pb.FUNCTION_CAPABILITY_STATE_APPLYING
@@ -1105,7 +1193,7 @@ class IntentRegistry:
                         function_name=name,
                         release_id=self.release_id,
                         config_generation=target_generation,
-                        binding_digest=_binding_digest(name, instance),
+                        binding_digest=self.binding_digest(name, instance),
                         lane=",".join(execution_lanes),
                         models=[
                             pb.ModelIdentity(
@@ -1216,4 +1304,4 @@ class IntentRegistry:
         return snapshot
 
 
-__all__ = ["IntentRegistry", "UnreportedIntentWait"]
+__all__ = ["CapabilityFacts", "IntentRegistry", "UnreportedIntentWait"]

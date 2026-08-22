@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import os
-from types import SimpleNamespace
 from typing import Any, Optional
 
 import msgspec
@@ -11,7 +9,7 @@ import pytest
 
 from gen_worker.config import load_settings
 from gen_worker.config.settings import BOOT_CONFIG_GENERATION_ABSENT
-from gen_worker.lifecycle_intents import IntentRegistry
+from gen_worker.lifecycle_intents import CapabilityFacts, IntentRegistry
 from gen_worker.pb import worker_scheduler_pb2 as pb
 
 _ENV = "WORKER_CONFIG_GENERATION"
@@ -57,18 +55,13 @@ def _capability_state(boot_stamp: int) -> Any:
     registry.apply_command(_command(registry, 1))
     registry.config_snapshot_applied(1)
     registry.bindings_applied(1)
-    runtime_config = SimpleNamespace(
-        generation=1, parameter_snapshot_generation=1, values={},
-    )
-    executor = SimpleNamespace(
-        runtime_config=runtime_config,
-        store=SimpleNamespace(residency_snapshot=lambda: []),
-        available_functions=lambda: ["echo"],
-        compile_targets=lambda: [],
-        unavailable={},
-    )
-    desired = pb.DesiredResidency(hot=[pb.DesiredInstance(function_name="echo")])
-    registry.refresh_projection(executor, desired, {})
+    registry.refresh_projection(CapabilityFacts(
+        config_generation=1,
+        parameter_snapshot_generation=1,
+        binding_ready_generation=1,
+        available=frozenset({"echo"}),
+        hot={"echo": pb.DesiredInstance(function_name="echo")},
+    ))
     return registry.snapshot().capabilities[0].state
 
 

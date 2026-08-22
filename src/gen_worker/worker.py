@@ -10,7 +10,6 @@ import logging
 import os
 import signal
 import time
-import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Mapping, Optional, Tuple
@@ -45,8 +44,15 @@ from .boot_materialize import (
 )
 from .discovery.names import slugify_name
 from . import postmortem
+from .lifecycle import WorkerLifecycle
+from .lifecycle_intents import CapabilityFacts
 from .procsplit import is_compute_child
 from .pb import worker_scheduler_pb2 as pb
+from .runtime_config import (
+    ConfigSnapshotWriteError,
+    ConfigStore,
+    extract_config_push,
+)
 from .serving.context import DeployBinding
 from .serving.entrypoints import ENTRYPOINT_ATTR, EntrypointSpec
 from .serving.envelope import EnvelopeError
@@ -508,7 +514,28 @@ class Worker:
             settings.worker_id.strip() or f"py-worker-{os.getpid()}"
         )
         self.release_id = settings.worker_release_id.strip()
-        self.worker_session_id = uuid.uuid4().hex
+        # Empty = ConfigStore's own env/default resolution. procsplit's privdrop
+        # grants the compute uid exactly `dirname(that)` (pgw#858), so this must
+        # not invent a second answer.
+        self.config = ConfigStore(str(settings.config_snapshot_path or "").strip())
+        self._desired_hot: Dict[str, pb.DesiredInstance] = {}
+        self._resolution_lanes: Dict[str, str] = {}
+        # ONE producer of this process's session id. Under procsplit it is the
+        # PARENT's, seeded through GEN_WORKER_SESSION_ID, so the id the hub sees
+        # on the Hello and the id stamped inside the projection are the same fact.
+        self.lifecycle = WorkerLifecycle(
+            release_id=self.release_id,
+            function_names=self.functions,
+            facts=self._lifecycle_facts,
+            send=self._send,
+            boot_config_generation=int(
+                getattr(settings, "boot_config_generation", -1)
+            ),
+        )
+        self.worker_session_id = self.lifecycle.worker_session_id
+        self.on_hello_ack = self.lifecycle.hello_ack_route(
+            self._on_hello_ack, prepare=self._absorb_hub_state
+        )
         self.file_base_url = ""
 
         boot_mod.mark_once(
@@ -521,6 +548,7 @@ class Worker:
         )
         self.resolver.bind_store(self.store)
         bind_active_store(self.store)
+        self.store.bind_intent_registry(self.lifecycle.registry)
         self.materialization = CheckpointMaterialization(
             self.store,
             announce=self._announce_readiness,
@@ -608,6 +636,7 @@ class Worker:
             )
         try:
             await self._send(pb.WorkerMessage(state_delta=self._state_delta()))
+            await self.lifecycle.publish()
         except Exception:  # noqa: BLE001 — the heartbeat re-states this
             logger.warning("readiness state delta send failed", exc_info=True)
         if not self.materialization.failed:
@@ -640,8 +669,42 @@ class Worker:
         _DISPATCH.set(picks)
         return ""
 
+    def _serving_tier(self) -> str:
+        adoption = getattr(self, "adoption", None)
+        if adoption is None:
+            return "eager"
+        try:
+            facts = adoption.facts()
+        except Exception:  # noqa: BLE001 — a tier label never fails a Hello
+            return "eager"
+        if not facts.get("adopting"):
+            return "eager"
+        return "compiled" if int(facts.get("adopted") or 0) > 0 else "eager"
+
+    def _lifecycle_facts(self) -> CapabilityFacts:
+        """This worker's own answer to every input the capability projection reads."""
+        ready = self.materialization.ready
+        generation = int(self.config.generation)
+        tier = self._serving_tier()
+        return CapabilityFacts(
+            config_generation=generation,
+            parameter_snapshot_generation=int(self.config.parameter_snapshot_generation),
+            binding_ready_generation=generation if ready else 0,
+            available=frozenset(self.functions) if ready else frozenset(),
+            unavailable=(
+                frozenset(self.functions) if self.materialization.failed else frozenset()
+            ),
+            hot=dict(self._desired_hot),
+            residency={m.ref: m for m in self.store.residency_snapshot()},
+            lanes=dict(self._resolution_lanes),
+            serving_tiers={name: tier for name in self.functions},
+        )
+
     def build_hello(self) -> pb.Hello:
-        return pb.Hello(
+        # ALL-OR-NOTHING: the session id and the projection come out of ONE call,
+        # so this Hello can never carry half of the pair (#1660 / th#2300).
+        session_id, snapshot = self.lifecycle.hello_projection()
+        hello = pb.Hello(
             protocol_version=PROTOCOL_VERSION,
             worker_id=self.worker_id,
             release_id=self.release_id,
@@ -652,10 +715,54 @@ class Worker:
                 for rid, att in sorted(self._jobs)
             ],
             heartbeat_interval_ms=HEARTBEAT_INTERVAL_MS,
-            worker_session_id=self.worker_session_id,
+            worker_session_id=session_id,
         )
+        if snapshot is not None:
+            hello.lifecycle_snapshot.CopyFrom(snapshot)
+        return hello
 
-    async def on_hello_ack(self, ack: pb.HelloAck) -> None:
+    def _absorb_hub_state(self, ack: pb.HelloAck) -> None:
+        """The hub-stated half of the capability projection.
+
+        ``lane`` is the hub's OWN resolution, never this worker's ladder pick:
+        `exactCapabilityExecutionLaneLocked` compares the capability's lane to
+        the lane the hub projected from these resolutions, so reporting anything
+        else is `exact_lane_mismatch` — a silent dispatch decline.
+        """
+        self._desired_hot = {
+            instance.function_name: instance
+            for instance in ack.desired_residency.hot
+            if instance.function_name
+        }
+        self._resolution_lanes = {
+            str(resolution.ref): str(resolution.lane or "")
+            for resolution in ack.resolutions
+            if str(resolution.ref or "").strip()
+        }
+        command = ack.desired_state_command
+        try:
+            push = extract_config_push(ack)
+            if push is not None:
+                generation, release_id = push
+                self.config.observe(
+                    generation, release_id=release_id or self.release_id
+                )
+            if not ack.HasField("desired_state_command"):
+                return
+            if int(command.config_generation) <= 0 or not command.parameter_snapshot:
+                return
+            self.config.apply_parameter_snapshot(
+                command.parameter_snapshot,
+                int(command.config_generation),
+                release_id=str(command.release_id or self.release_id),
+            )
+        except ConfigSnapshotWriteError as exc:
+            # Withdraws config readiness rather than claiming a generation this
+            # process cannot prove it durably holds.
+            logger.error("config parameter snapshot not applied: %s", exc)
+            self.lifecycle.registry.config_snapshot_failed(str(exc))
+
+    async def _on_hello_ack(self, ack: pb.HelloAck) -> None:
         self.file_base_url = str(ack.file_base_url or "")
         logger.info(
             "hello acked: functions=%s file_base_url=%s",
@@ -670,6 +777,9 @@ class Worker:
                 boot_mod.PHASE_FIRST_REQUEST_SERVABLE,
                 function=",".join(self.functions),
             )
+        # The hub's desired instances and resolved lanes only became known a
+        # moment ago; the projection that rode with the receipt did not have them.
+        await self.lifecycle.publish()
         if not self.file_base_url:
             logger.error(
                 "hello acked with NO file_base_url: the compiled-graph receipt "
@@ -1079,6 +1189,7 @@ class Worker:
             logger.debug("mint: %s", self.mint_facts())
             try:
                 await self._send(pb.WorkerMessage(state_delta=self._state_delta()))
+                await self.lifecycle.publish()
             except Exception:
                 logger.warning("heartbeat send failed", exc_info=True)
 

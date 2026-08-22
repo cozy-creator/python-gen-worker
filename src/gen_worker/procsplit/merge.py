@@ -13,10 +13,12 @@ __all__ = [
     "merge_state_deltas",
     "merge_residency",
     "merge_hello",
+    "merge_lifecycle_snapshots",
     "merge_phase",
     "reconcile_activity_kind",
     "worker_fn_unavailable",
     "worker_fn_degraded",
+    "worker_goal_receipt",
 ]
 
 _PHASE_RANK = {
@@ -192,6 +194,152 @@ def worker_fn_degraded(
     return min(reports, key=lambda r: r.est_latency_multiplier or float("inf"))
 
 
+_CAPABILITY_RANK = {
+    pb.FUNCTION_CAPABILITY_STATE_UNSPECIFIED: 0,
+    pb.FUNCTION_CAPABILITY_STATE_FAILED: 1,
+    pb.FUNCTION_CAPABILITY_STATE_BOOT_STALE: 2,
+    pb.FUNCTION_CAPABILITY_STATE_APPLYING: 3,
+    pb.FUNCTION_CAPABILITY_STATE_READY: 4,
+}
+
+_CONFIG_RANK = {
+    pb.CONFIG_APPLICATION_STATE_UNSPECIFIED: 0,
+    pb.CONFIG_APPLICATION_STATE_FAILED: 1,
+    pb.CONFIG_APPLICATION_STATE_BOOT_STALE: 2,
+    pb.CONFIG_APPLICATION_STATE_APPLYING: 3,
+    pb.CONFIG_APPLICATION_STATE_CONVERGED: 4,
+}
+
+_INTENT_RANK = {
+    pb.LIFECYCLE_INTENT_STATUS_FAILED: 0,
+    pb.LIFECYCLE_INTENT_STATUS_CANCELED: 1,
+    pb.LIFECYCLE_INTENT_STATUS_ACCEPTED: 2,
+    pb.LIFECYCLE_INTENT_STATUS_WAITING: 3,
+    pb.LIFECYCLE_INTENT_STATUS_RUNNING: 4,
+    pb.LIFECYCLE_INTENT_STATUS_SUPERSEDED: 5,
+    pb.LIFECYCLE_INTENT_STATUS_SUCCEEDED: 6,
+}
+
+
+def _intent_rank(intent: pb.IntentState) -> int:
+    return int(_INTENT_RANK.get(intent.status, 0))
+
+
+def _capability_rank(capability: pb.FunctionCapability) -> int:
+    return int(_CAPABILITY_RANK.get(capability.state, 0))
+
+
+def _config_rank(application: pb.ConfigApplication) -> int:
+    return int(_CONFIG_RANK.get(application.state, 0))
+
+
+def worker_goal_receipt(
+    per_group: Mapping[int, Optional[pb.GoalReceipt]],
+) -> Optional[pb.GoalReceipt]:
+    """The worker-level answer to ONE desired-state command.
+
+    The hub sees one worker, so it gets one receipt. A command is ACCEPTED only
+    when every live group accepted it, and any group's REJECTED is the worker's
+    answer — an ACCEPTED that hid a group's refusal would let the hub dispatch
+    work that a third of this pod cannot do. Withheld (``None``) until every live
+    group has answered.
+    """
+    if not per_group:
+        return None
+    answers = list(per_group.values())
+    if any(receipt is None for receipt in answers):
+        return None
+    present = [receipt for receipt in answers if receipt is not None]
+    rejected = [r for r in present if r.status == pb.GOAL_RECEIPT_STATUS_REJECTED]
+    if rejected:
+        return rejected[0]
+    merged = pb.GoalReceipt()
+    merged.CopyFrom(present[0])
+    del merged.rejections[:]
+    seen = set()
+    for receipt in present:
+        for rejection in receipt.rejections:
+            if rejection.intent_id in seen:
+                continue
+            seen.add(rejection.intent_id)
+            merged.rejections.append(rejection)
+    return merged
+
+
+def merge_lifecycle_snapshots(
+    snapshots: Sequence[Optional[pb.LifecycleSnapshot]],
+) -> Optional[pb.LifecycleSnapshot]:
+    """One worker-level lifecycle projection from G per-group ones.
+
+    ALL-OR-NOTHING (#1660): one group with no projection means the WORKER has no
+    complete projection, because the hub judges — and dispatches to — the pod as
+    a single worker. Every collapse below takes the LEAST ready answer for the
+    same reason `merge_phase` does: a wide worker that hides one unready group
+    behind three ready ones is the pod that accepts work it cannot serve.
+
+    ``state_seq`` is deliberately NOT merged here — it is the parent's own
+    monotonic counter (a compute child that respawns restarts its own at 1, and
+    the hub silently DROPS a lower seq).
+    """
+    if not snapshots:
+        return None
+    if any(snapshot is None for snapshot in snapshots):
+        return None
+    present = [s for s in snapshots if s is not None]
+    merged = pb.LifecycleSnapshot()
+    merged.CopyFrom(present[0])
+    merged.full_replace = True
+    if len(present) == 1:
+        return merged
+
+    merged.generated_at_unix_ms = max(s.generated_at_unix_ms for s in present)
+
+    intents: Dict[str, pb.IntentState] = {}
+    for snapshot in present:
+        for intent in snapshot.intents:
+            prior = intents.get(intent.intent_id)
+            if prior is None or _intent_rank(intent) < _intent_rank(prior):
+                intents[intent.intent_id] = intent
+    del merged.intents[:]
+    for intent_id in sorted(intents):
+        merged.intents.append(intents[intent_id])
+
+    capabilities: Dict[str, pb.FunctionCapability] = {}
+    for snapshot in present:
+        for capability in snapshot.capabilities:
+            prior = capabilities.get(capability.function_name)
+            if prior is None or _capability_rank(capability) < _capability_rank(prior):
+                capabilities[capability.function_name] = capability
+    del merged.capabilities[:]
+    for name in sorted(capabilities):
+        merged.capabilities.append(capabilities[name])
+
+    receipts: Dict[str, List[pb.GoalReceipt]] = {}
+    for snapshot in present:
+        for receipt in snapshot.goal_receipts:
+            receipts.setdefault(receipt.goal_id, []).append(receipt)
+    del merged.goal_receipts[:]
+    for goal_id in sorted(receipts):
+        answer = worker_goal_receipt(dict(enumerate(receipts[goal_id])))
+        if answer is not None:
+            merged.goal_receipts.append(answer)
+
+    applications = [s.config_application for s in present if s.HasField("config_application")]
+    if applications:
+        merged.config_application.CopyFrom(
+            min(applications, key=_config_rank)
+        )
+    else:
+        merged.ClearField("config_application")
+
+    drains = [s.drain for s in present if s.HasField("drain")]
+    if drains:
+        merged.drain.CopyFrom(min(drains, key=lambda d: int(d.status)))
+    else:
+        merged.ClearField("drain")
+    return merged
+
+
 def merge_hello(
     hellos: Sequence[pb.Hello],
     *,
@@ -214,6 +362,14 @@ def merge_hello(
         merged.models.extend(merge_residency([list(h.models) for h in hellos]))
         promised = [h.heartbeat_interval_ms for h in hellos if h.heartbeat_interval_ms]
         merged.heartbeat_interval_ms = min(promised) if promised else 0
+        projection = merge_lifecycle_snapshots([
+            h.lifecycle_snapshot if h.HasField("lifecycle_snapshot") else None
+            for h in hellos
+        ])
+        if projection is None:
+            merged.ClearField("lifecycle_snapshot")
+        else:
+            merged.lifecycle_snapshot.CopyFrom(projection)
 
     seen = set()
     del merged.in_flight[:]
