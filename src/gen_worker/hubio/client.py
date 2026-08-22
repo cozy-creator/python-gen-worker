@@ -14,14 +14,18 @@ from typing import Any, Callable, Dict, Mapping, Optional, cast
 
 import requests
 from gen_worker._vendor.tensorfs import CASRef, RepositoryManifest
-from gen_worker.cas.admission import ingest_file
-from gen_worker.transfer.grants import TransferGrant, upload
+from gen_worker.cas.admission import stage_file
+from gen_worker.transfer.grants import (
+    ObjectRegion,
+    StagedRegions,
+    TransferGrant,
+    upload,
+)
 from gen_worker.transfer.journal import TransferJournal, TransferSession
 
 from .. import activity as _activity
 from .. import scratchrepo
 from ..http_origin import is_definite_hub_answer, response_is_from_hub
-from ..models.cache_paths import open_worker_cas
 from ..stall import SilenceWindow
 from .publish_state import JOURNAL_NAME, STATE_NAME, ProducerRecovery
 
@@ -359,15 +363,19 @@ class HubClient:
 
         repo_path = self._repo_path(destination_repo)
 
-        cas = open_worker_cas()
         entries = []
+        staged: dict[CASRef, ObjectRegion] = {}
         for f in files:
             if f.local_path is None:
                 raise HubPublishError(
                     f"publish_v2: {f.path!r} is a by-reference add; v2 declares "
                     "digests computed from local bytes"
                 )
-            entries.append(ingest_file(cas, Path(f.local_path), manifest_path=f.path))
+            planned = stage_file(Path(f.local_path), manifest_path=f.path)
+            entries.append(planned.entry)
+            for obj in planned.objects:
+                staged.setdefault(
+                    obj.digest, ObjectRegion(obj.path, obj.offset, obj.length))
         manifest = RepositoryManifest(tuple(entries))
         manifest_ref = manifest.digest()
 
@@ -528,7 +536,7 @@ class HubClient:
                        bytes=sum(g.size_bytes for g in grants), attempt=attempt)
                 report = upload(
                     grants,
-                    cas,
+                    StagedRegions(staged),
                     progress=(lambda _digest, n: part_progress(0, 0, n))
                     if callable(part_progress) else None,
                 )
@@ -649,6 +657,24 @@ class HubClient:
         )
 
 
+def publish_staging_bytes(published_bytes: int) -> int:
+    """Local disk `publish_v2` needs to publish `published_bytes` of tree.
+
+    ZERO, and this function exists so nobody has to remember that. A publish
+    stages BY REFERENCE (`cas.stage_file`): it hashes the producer's own
+    files and uploads byte ranges of them, so the only bytes it writes are
+    the ones already on disk. Any caller sizing a disk asks HERE rather than
+    guessing — pgw#1666 is what guessing cost: the preflight budgeted
+    `source + outputs + margin`, the publish silently copied the whole
+    published tree into the local CAS, and a 50 GB mirror died on ENOSPC
+    after paying for its download and its cast.
+    """
+
+    if published_bytes < 0:
+        raise ValueError("published bytes must not be negative")
+    return 0
+
+
 def files_from_tree(tree: Path, *, prefix: str = "") -> list[CommitFile]:
     """Build CommitFile entries for every regular file under ``tree``."""
     tree = Path(tree)
@@ -681,4 +707,5 @@ __all__ = [
     "CommitFile",
     "CommitResult",
     "files_from_tree",
+    "publish_staging_bytes",
 ]

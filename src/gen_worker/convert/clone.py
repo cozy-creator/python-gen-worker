@@ -17,8 +17,14 @@ from typing import Any, Iterable, Optional
 from gen_worker.api.errors import ValidationError
 
 from ..serving_facts import OBJECTIVES
-from ..hubio.client import HubClient, _dtype_token, files_from_tree
+from ..hubio.client import (
+    HubClient,
+    _dtype_token,
+    files_from_tree,
+    publish_staging_bytes,
+)
 from ..hubio.publish_state import JOURNAL_NAME, ProducerRecovery
+from ..models.cache_paths import tensorhub_cas_dir
 from .convert import run_inline_conversion
 from .dtype_pins import (
     DTYPE_BITS as _DTYPE_STORAGE_BITS,
@@ -369,9 +375,106 @@ def _output_tree_bytes(
     return (source_bytes * out_bits + source_bits - 1) // source_bits
 
 
-def _preflight_disk(workdir: Path, plan: Any, specs: list[OutputSpec]) -> None:
+WORKDIR = "workdir"
+CAS = "cas"
+
+
+@dataclass(frozen=True, slots=True)
+class DiskStage:
+    """One thing this job's pipeline writes, and the disk it writes it to."""
+
+    name: str
+    bytes: int
+    where: str = WORKDIR
+
+
+@dataclass(frozen=True, slots=True)
+class DiskDemand:
+    """Every byte the pipeline puts on disk, stage by stage.
+
+    Enumerated rather than totalled, because the defect this shape exists to
+    prevent (pgw#1666) was an OMITTED STAGE, not bad arithmetic: the publish
+    wrote a whole second copy of the produced tree and the total had no term
+    for it, so the guard passed and the job died at the last step having paid
+    for everything. A stage that writes nothing still appears, at zero — the
+    reader has to be able to see that it was ASKED.
+    """
+
+    stages: tuple[DiskStage, ...]
+    margin: int
+    notes: tuple[str, ...] = ()
+
+    @property
+    def required(self) -> int:
+        return sum(stage.bytes for stage in self.stages) + self.margin
+
+    def required_on(self, where: str) -> int:
+        return sum(stage.bytes for stage in self.stages if stage.where == where)
+
+    def describe(self) -> str:
+        gib = float(1024**3)
+        parts = [f"{stage.name} {stage.bytes / gib:.1f} GiB" for stage in self.stages]
+        parts.extend(self.notes)
+        parts.append(f"{self.margin / gib:.0f} GiB margin")
+        return "; ".join(parts)
+
+
+def _existing_ancestor(path: Path) -> Path:
+    probe = Path(path)
+    while not probe.exists() and probe.parent != probe:
+        probe = probe.parent
+    return probe
+
+
+PUBLISH_SOURCE = "publish-source"
+CAST_OUTPUT = "cast"
+NOT_POSSIBLE = "not-possible"
+
+
+def spec_actions(
+    specs: list[OutputSpec],
+    *,
+    publish_as_is: bool,
+    source_dtype: str,
+    explicit_outputs: bool,
+    cast_eligible: bool,
+) -> list[str]:
+    """What the run will DO with each output spec — one producer.
+
+    ``run_clone`` executes this list and ``plan_disk_demand`` prices it.
+    Splitting them is how pgw#1666 hid a SECOND under-count behind the first:
+    the budget read `strategy in _PUBLISH_AS_IS_STRATEGIES`, concluded
+    "publishes the source tree directly" and stopped — while the run went on
+    to CAST a whole second tree, which the budget then had no term for. The
+    two must never again be able to disagree about what happens.
+    """
+
+    actions: list[str] = []
+    for index, spec in enumerate(specs):
+        if not publish_as_is:
+            actions.append(CAST_OUTPUT)
+            continue
+        dtype_matches = (not source_dtype) or spec.dtype == source_dtype
+        if dtype_matches or not explicit_outputs:
+            actions.append(PUBLISH_SOURCE)
+        elif index == 0 and spec.file_type == "safetensors" and cast_eligible:
+            actions.append(CAST_OUTPUT)
+        else:
+            actions.append(NOT_POSSIBLE)
+    return actions
+
+
+def plan_disk_demand(
+    plan: Any, specs: list[OutputSpec], *, explicit_outputs: bool = True,
+) -> Optional[DiskDemand]:
+    """What this clone will write, derived from the stages it will run.
+
+    ``None`` when the plan is too odd to read — an unreadable plan is not a
+    refusal, it is an unmeasured job.
+    """
+
     if plan is None:
-        return
+        return None
     try:
         files = [(str(path), int(size)) for path, size, _ in plan.bank_files()]
         source_bytes = sum(size for _, size in files)
@@ -397,87 +500,133 @@ def _preflight_disk(workdir: Path, plan: Any, specs: list[OutputSpec]) -> None:
             and _plan_has_no_repackager(plan)
         )
     except Exception:  # noqa: BLE001 — preflight is best-effort on odd plans
-        return
+        return None
     if source_bytes <= 0:
+        return None
+
+    source_layout = attrs.get("file_layout", "")
+    source_dtype = attrs.get("dtype", "")
+    source_type = attrs.get("file_type", "") or (
+        "gguf" if any(path.lower().endswith(".gguf") for path, _ in files)
+        else "safetensors"
+    )
+    publish_as_is = strategy in _PUBLISH_AS_IS_STRATEGIES or no_repackager
+    actions = spec_actions(
+        specs,
+        publish_as_is=publish_as_is,
+        source_dtype=source_dtype,
+        explicit_outputs=explicit_outputs,
+        cast_eligible=(strategy in _CAST_ELIGIBLE_PUBLISH_AS_IS_STRATEGIES
+                       or no_repackager),
+    )
+    shard_groups: dict[str, int] = {}
+    for path, size in files:
+        m = _SHARD_MEMBER_RE.match(path)
+        if m:
+            shard_groups[m.group("group")] = shard_groups.get(m.group("group"), 0) + size
+    sharded_bytes = sum(shard_groups.values())
+    measured_bits = int(getattr(plan, "source_storage_bits", 0) or 0)
+    source_bits = measured_bits or _DTYPE_STORAGE_BITS.get(
+        source_dtype, _UNRESOLVED_SOURCE_BITS)
+
+    stages = [DiskStage("source tree", source_bytes)]
+    notes: list[str] = []
+    output_sizes: list[int] = []
+    deshard_bytes = gguf_intermediate = repack = published_bytes = 0
+    reused_in_place = False
+
+    for spec, action in zip(specs, actions):
+        if action == NOT_POSSIBLE:
+            continue
+        # A spec the source already satisfies is HARDLINKED into its output
+        # tree rather than written; only a sharded safetensors set costs
+        # bytes, because de-sharding merges it into one new file per component.
+        in_place = action == PUBLISH_SOURCE or (
+            source_layout and spec.file_layout == source_layout
+            and spec.file_type == source_type
+            and (spec.dtype == "source"
+                 or (source_dtype and spec.dtype == source_dtype))
+        )
+        if in_place:
+            reused_in_place = True
+            published_bytes += source_bytes
+            if spec.file_type == "safetensors":
+                deshard_bytes += sharded_bytes
+            continue
+        size = _output_tree_bytes(spec, source_bytes, source_bits, measured_bits)
+        output_sizes.append(size)
+        published_bytes += size
+        if spec.file_type == "gguf" and spec.dtype not in _DIRECT_GGUF_ENCODINGS:
+            gguf_intermediate = max(
+                gguf_intermediate,
+                (source_bytes * 16 + source_bits - 1) // source_bits)
+        # A publish-as-is cast keeps the SOURCE's layout (`effective_layout` in
+        # `run_clone`), so it never repacks; only a real flavor build can.
+        layout = source_layout if publish_as_is else spec.file_layout
+        if spec.file_type != "gguf" and source_layout and layout != source_layout:
+            repack = max(repack, size)
+
+    if output_sizes:
+        stages.append(DiskStage(
+            f"{len(output_sizes)} materialized output tree(s)", sum(output_sizes)))
+    if deshard_bytes:
+        stages.append(DiskStage("one merged de-shard output", deshard_bytes))
+    if gguf_intermediate:
+        stages.append(DiskStage("one intermediate F16 GGUF tree", gguf_intermediate))
+    if repack:
+        stages.append(DiskStage("one layout-repack tree", repack))
+    if publish_as_is:
+        notes.append(f"{strategy} publishes the source tree directly")
+    if reused_in_place:
+        notes.append("hardlink passthrough")
+    if (output_sizes and not measured_bits
+            and source_dtype not in _DTYPE_STORAGE_BITS):
+        notes.append(
+            f"source dtype unreadable, assumed {_UNRESOLVED_SOURCE_BITS}-bit")
+
+    # The LAST stage of every clone is a publish, and it is the one the old
+    # budget forgot. Its cost is not guessed here: `publish_v2` states it.
+    stages.append(DiskStage(
+        "publish staging", publish_staging_bytes(published_bytes), where=CAS))
+    return DiskDemand(tuple(stages), _DISK_MARGIN_BYTES, tuple(notes))
+
+
+def _preflight_disk(
+    workdir: Path, plan: Any, specs: list[OutputSpec],
+    *, explicit_outputs: bool = True,
+) -> None:
+    """Refuse at $0 what would otherwise die at 250 GPU-s (pgw#1666)."""
+
+    demand = plan_disk_demand(plan, specs, explicit_outputs=explicit_outputs)
+    if demand is None:
         return
 
-    if strategy in _PUBLISH_AS_IS_STRATEGIES or no_repackager:
-        required = source_bytes + _DISK_MARGIN_BYTES
-        operation = f"{strategy} publishes the source tree directly"
-    else:
-        source_layout = attrs.get("file_layout", "")
-        source_dtype = attrs.get("dtype", "")
-        source_type = attrs.get("file_type", "") or (
-            "gguf" if any(path.lower().endswith(".gguf") for path, _ in files)
-            else "safetensors"
-        )
-        passthrough = [
-            spec for spec in specs
-            if source_layout and spec.file_layout == source_layout
-            and spec.file_type == source_type
-            and (spec.dtype == "source" or (source_dtype and spec.dtype == source_dtype))
-        ]
-        materialized = [spec for spec in specs if spec not in passthrough]
-        shard_groups: dict[str, int] = {}
-        for path, size in files:
-            m = _SHARD_MEMBER_RE.match(path)
-            if m:
-                shard_groups[m.group("group")] = shard_groups.get(m.group("group"), 0) + size
-        deshard_bytes = len(passthrough) * max(shard_groups.values(), default=0)
-        measured_bits = int(getattr(plan, "source_storage_bits", 0) or 0)
-        source_bits = measured_bits or _DTYPE_STORAGE_BITS.get(
-            source_dtype, _UNRESOLVED_SOURCE_BITS)
-        output_sizes = [
-            _output_tree_bytes(spec, source_bytes, source_bits, measured_bits)
-            for spec in materialized
-        ]
-        gguf_intermediate = max(
-            (
-                (source_bytes * 16 + source_bits - 1) // source_bits
-                for spec in materialized
-                if spec.file_type == "gguf"
-                and spec.dtype not in _DIRECT_GGUF_ENCODINGS
-            ),
-            default=0,
-        )
-        repack = max(
-            (
-                size for spec, size in zip(materialized, output_sizes)
-                if spec.file_type != "gguf"
-                and source_layout and spec.file_layout != source_layout
-            ),
-            default=0,
-        )
-        required = (
-            source_bytes + sum(output_sizes) + gguf_intermediate
-            + deshard_bytes + repack + _DISK_MARGIN_BYTES
-        )
-        parts = []
-        if passthrough:
-            parts.append("hardlink passthrough")
-        if materialized:
-            parts.append(f"{len(materialized)} materialized output tree(s)")
-        if deshard_bytes:
-            parts.append("one merged de-shard output")
-        if gguf_intermediate:
-            parts.append("one intermediate F16 GGUF tree")
-        if repack:
-            parts.append("one layout-repack tree")
-        if (materialized and not measured_bits
-                and source_dtype not in _DTYPE_STORAGE_BITS):
-            parts.append(
-                "source dtype unreadable, assumed "
-                f"{_UNRESOLVED_SOURCE_BITS}-bit")
-        operation = ", ".join(parts) or "source tree"
+    roots = {WORKDIR: _existing_ancestor(workdir),
+             CAS: _existing_ancestor(tensorhub_cas_dir())}
+    # One budget per FILESYSTEM: stages that share a device share its free
+    # space, and a CAS on its own mount is checked against its own.
+    devices: dict[Any, list[str]] = {}
+    for where, root in roots.items():
+        try:
+            device: Any = os.stat(root).st_dev
+        except OSError:
+            device = root
+        devices.setdefault(device, []).append(where)
 
-    free = shutil.disk_usage(workdir).free
-    if free < required:
-        gib = float(1024**3)
+    gib = float(1024**3)
+    for wheres in devices.values():
+        required = sum(demand.required_on(where) for where in wheres)
+        if not required:
+            continue
+        required += _DISK_MARGIN_BYTES
+        root = roots[wheres[0]]
+        free = shutil.disk_usage(root).free
+        if free >= required:
+            continue
         raise CloneDiskSpaceError(
             f"not enough disk for clone: need ~{required / gib:.1f} GiB free "
-            f"(source {source_bytes / gib:.1f} GiB; {operation}; "
-            f"{_DISK_MARGIN_BYTES / gib:.0f} GiB margin), have {free / gib:.1f} GiB "
-            f"at {workdir}")
+            f"({demand.describe()}), have {free / gib:.1f} GiB "
+            f"at {root}")
 
 def _reusable_flavor_tree(
     workdir: Path, spec_label: str, flavor_dir: Path,
@@ -638,7 +787,7 @@ def run_clone(
             logger.warning(
                 "clone source plan failed (download-skip disabled for this run): %s", exc)
 
-        _preflight_disk(workdir, plan, specs)
+        _preflight_disk(workdir, plan, specs, explicit_outputs=explicit_outputs)
 
         _progress(0.05, "clone.ingest")
         dl_bytes = {"done": 0}
@@ -681,14 +830,22 @@ def run_clone(
         no_repackager = strategy == "aio_singlefile" and (
             declared is None or not declared.supports_singlefile_to_diffusers)
         publish_as_is = strategy in _PUBLISH_AS_IS_STRATEGIES or no_repackager
+        source_dtype = str(source.attrs.get("dtype") or "").strip().lower()
+        # The SAME list the disk preflight priced (pgw#1666).
+        actions = spec_actions(
+            specs,
+            publish_as_is=publish_as_is,
+            source_dtype=source_dtype,
+            explicit_outputs=explicit_outputs,
+            cast_eligible=(strategy in _CAST_ELIGIBLE_PUBLISH_AS_IS_STRATEGIES
+                           or no_repackager),
+        )
 
         for i, spec in enumerate(specs):
             dtype_label = spec.dtype
             try:
                 if publish_as_is:
-                    source_dtype = str(source.attrs.get("dtype") or "").strip().lower()
-                    dtype_matches = (not source_dtype) or spec.dtype == source_dtype
-                    if dtype_matches or not explicit_outputs:
+                    if actions[i] == PUBLISH_SOURCE:
                         tree = source.dir
                         attrs = dict(source.attrs)
                         dtype_label = source_dtype or spec.dtype
@@ -700,9 +857,7 @@ def run_clone(
                             copy_non_weight_files(Path(tree), deshard_dir, skip_components=set())
                             deshard_mirror_tree(deshard_dir)
                             tree = deshard_dir
-                    elif i == 0 and spec.file_type == "safetensors" \
-                            and (strategy in _CAST_ELIGIBLE_PUBLISH_AS_IS_STRATEGIES
-                                 or no_repackager):
+                    elif actions[i] == CAST_OUTPUT:
                         effective_layout = (
                             source.layout if source.layout in _KNOWN_FILE_LAYOUTS
                             else SINGLE_FILE

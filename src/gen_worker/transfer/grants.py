@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import http.client
 import os
 import random
@@ -121,8 +122,58 @@ class TransferGrant:
         )
 
 
+@dataclass(frozen=True, slots=True)
+class ObjectRegion:
+    """One object's bytes: a byte range of a file that already exists."""
+
+    path: Path
+    offset: int
+    length: int
+
+
+class ObjectSource(Protocol):
+    """Where an upload finds the bytes of one declared object."""
+
+    def region(self, digest: CASRef, size: int) -> ObjectRegion: ...
+
+
+@dataclass(frozen=True, slots=True)
+class CASObjects:
+    """The local store as an upload source: one whole object per file."""
+
+    cas: LocalCAS
+
+    def region(self, digest: CASRef, size: int) -> ObjectRegion:
+        return ObjectRegion(self.cas.verify_object(digest, size=size), 0, size)
+
+
+@dataclass(frozen=True, slots=True)
+class StagedRegions:
+    """Objects that live inside the producer's own files, uncopied.
+
+    The bytes are re-hashed as they are sent (`_HTTPTransport.upload`), so a
+    region that no longer holds the declared object fails this transfer
+    instead of installing wrong bytes -- the same guarantee the CAS gives by
+    verifying before it sends, at one read instead of two.
+    """
+
+    objects: Mapping[CASRef, ObjectRegion]
+
+    def region(self, digest: CASRef, size: int) -> ObjectRegion:
+        found = self.objects.get(CASRef.parse(digest))
+        if found is None:
+            raise _TransferRefused(
+                f"{digest}: the plan grants an object this publish never "
+                "declared; nothing on this machine can satisfy it")
+        if found.length != size:
+            raise DigestMismatch(
+                f"{digest}: staged region is {found.length} bytes, "
+                f"the grant declares {size}")
+        return found
+
+
 class _GrantTransport(Protocol):
-    def upload(self, grant: TransferGrant, source: Path) -> None: ...
+    def upload(self, grant: TransferGrant, source: ObjectRegion) -> None: ...
 
     def download(self, grant: TransferGrant, destination: Path) -> None: ...
 
@@ -145,17 +196,33 @@ class _HTTPTransport:
         except (OSError, urllib.error.URLError) as exc:
             raise _TransientTransferError(str(exc)) from exc
 
-    def upload(self, grant: TransferGrant, source: Path) -> None:
-        if source.stat().st_size != grant.size_bytes:
+    def upload(self, grant: TransferGrant, source: ObjectRegion) -> None:
+        if source.length != grant.size_bytes:
             raise DigestMismatch(
-                f"{grant.digest}: upload source is {source.stat().st_size} bytes, "
+                f"{grant.digest}: upload source is {source.length} bytes, "
                 f"expected {grant.size_bytes}"
             )
 
         def body() -> Iterator[bytes]:
-            with source.open("rb") as handle:
-                while block := handle.read(self.block_bytes):
+            digest = hashlib.sha256()
+            remaining = source.length
+            with source.path.open("rb") as handle:
+                if source.offset:
+                    handle.seek(source.offset)
+                while remaining > 0:
+                    block = handle.read(min(remaining, self.block_bytes))
+                    if not block:
+                        raise DigestMismatch(
+                            f"{grant.digest}: {source.path} ended "
+                            f"{remaining} bytes short of the declared object")
+                    remaining -= len(block)
+                    digest.update(block)
                     yield block
+            if digest.hexdigest() != grant.digest.digest:
+                raise DigestMismatch(
+                    f"{grant.digest}: {source.path} bytes "
+                    f"[{source.offset}, {source.offset + source.length}) "
+                    f"hash to sha256:{digest.hexdigest()}")
 
         headers = dict(grant.headers)
         content_lengths = [
@@ -316,9 +383,13 @@ def _run_parallel(
     return report
 
 
+def _as_source(source: ObjectSource | LocalCAS) -> ObjectSource:
+    return CASObjects(source) if isinstance(source, LocalCAS) else source
+
+
 def _upload(
     grants: Sequence[TransferGrant],
-    source: LocalCAS,
+    source: ObjectSource | LocalCAS,
     *,
     transport: _GrantTransport,
     parallel: int = DEFAULT_PARALLEL,
@@ -326,12 +397,13 @@ def _upload(
     sleep: Callable[[float], None] = time.sleep,
     progress: Callable[[CASRef, int], None] | None = None,
 ) -> TransferReport:
+    objects = _as_source(source)
 
     def one(grant: TransferGrant) -> bool:
-        path = source.verify_object(grant.digest, size=grant.size_bytes)
+        region = objects.region(grant.digest, grant.size_bytes)
         _retry(
             grant,
-            lambda: transport.upload(grant, path),
+            lambda: transport.upload(grant, region),
             max_attempts=max_attempts,
             sleep=sleep,
         )
@@ -342,7 +414,7 @@ def _upload(
 
 def upload(
     grants: Sequence[TransferGrant],
-    source: LocalCAS,
+    source: ObjectSource | LocalCAS,
     *,
     parallel: int = DEFAULT_PARALLEL,
     max_attempts: int = 5,
