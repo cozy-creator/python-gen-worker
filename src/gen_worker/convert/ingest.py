@@ -47,6 +47,27 @@ logger = logging.getLogger(__name__)
 ProgressFn = Callable[[int, Optional[int]], None]
 
 
+class PlanTicker:
+    """The PLAN phase's position: completed remote metadata items, counted.
+
+    Planning does unbounded network work — a recursive repo-tree walk, side-file
+    fetches, safetensors header reads — before a weight byte moves, and the more
+    sharded the source the longer it runs. Reporting nothing while it runs is
+    what made a 13-shard source unmirrorable: the hub's phase budget expired on
+    a position frozen at 0 and killed a job that was working (pgw#1667). Every
+    loop in there is a bounded, countable iteration, so it can say so.
+    """
+
+    def __init__(self, progress: ProgressFn | None = None) -> None:
+        self._progress = progress
+        self._done = 0
+
+    def tick(self, n: int = 1) -> None:
+        self._done += max(0, int(n))
+        if self._progress is not None:
+            self._progress(self._done, None)
+
+
 class CloneDownloadError(RuntimeError):
     """Source download failed after bounded retries — the clone job fails cleanly instead of hanging."""
 
@@ -83,6 +104,7 @@ def _remote_safetensors_width(
     revision: str | None,
     filenames: Sequence[str],
     hf_token: str | None,
+    ticker: PlanTicker | None = None,
 ) -> tuple[str, int]:
     api = hf().HfApi(token=(hf_token or None))
     bytes_by_dtype: dict[str, int] = {}
@@ -95,8 +117,12 @@ def _remote_safetensors_width(
             meta = api.parse_safetensors_file_metadata(
                 repo_id, name, revision=revision)
         except Exception:  # noqa: BLE001 — any unreadable header just abstains
+            if ticker is not None:
+                ticker.tick()
             continue
         read += 1
+        if ticker is not None:
+            ticker.tick()
         for raw_dtype, params in (getattr(meta, "parameter_count", None) or {}).items():
             bits = _SAFETENSORS_DTYPE_BITS.get(str(raw_dtype).upper())
             if not bits:
@@ -172,12 +198,15 @@ def _hf_classification_inputs(
     repo_id: str,
     revision: str | None,
     hf_token: str | None,
+    ticker: PlanTicker | None = None,
 ) -> tuple[list[str], dict[str, int], dict[str, Any], dict[str, str]]:
     api = hf().HfApi(token=(hf_token or None))
+    tick = ticker.tick if ticker is not None else (lambda n=1: None)
     paths: list[str] = []
     sizes: dict[str, int] = {}
     content_ids: dict[str, str] = {}
     for entry in api.list_repo_tree(repo_id, revision=revision, recursive=True):
+        tick()
         path = str(getattr(entry, "path", "") or "")
         size = getattr(entry, "size", None)
         if not path or size is None:
@@ -204,6 +233,7 @@ def _hf_classification_inputs(
             side["config_json"] = json.loads(Path(local).read_text(encoding="utf-8"))
         except Exception:
             side["config_json"] = None
+        tick()
 
     if "config.json" not in paths and "model_index.json" not in paths:
         component_configs: dict[str, Any] = {}
@@ -222,6 +252,8 @@ def _hf_classification_inputs(
                     Path(local).read_text(encoding="utf-8"))
             except Exception:
                 continue
+            finally:
+                tick()
         if component_configs:
             side["component_configs"] = component_configs
 
@@ -236,12 +268,14 @@ def _hf_classification_inputs(
                     break
         except Exception:
             pass
+        tick()
         try:
             card = hf().ModelCard.load(repo_id, token=(hf_token or None))
             tags = getattr(card.data, "tags", None) or []
             side["readme_tags"] = [str(t) for t in tags]
         except Exception:
             pass
+        tick()
     return paths, sizes, side, content_ids
 
 
@@ -320,13 +354,21 @@ def plan_huggingface(
     gguf_quant: str | None = None,
     hf_token: str | None = None,
     source_include: Sequence[str] | None = None,
+    progress: ProgressFn | None = None,
 ) -> HFSourcePlan:
-    """Resolve + classify one HF repo from metadata alone (no weight bytes)."""
+    """Resolve + classify one HF repo from metadata alone (no weight bytes).
+
+    ``progress`` is ticked once per completed remote metadata item, so the
+    caller's declared position advances while this runs (pgw#1667).
+    """
     install_hf_http_timeouts()
+    ticker = PlanTicker(progress)
     try:
         repo_id, sha = resolve_hf_identity(source_ref, revision=revision, hf_token=hf_token)
+        ticker.tick()
         rev = sha or (str(revision).strip() if revision else None)
-        paths, sizes, side, content_ids = _hf_classification_inputs(repo_id, rev, hf_token)
+        paths, sizes, side, content_ids = _hf_classification_inputs(
+            repo_id, rev, hf_token, ticker)
     except _hf_access_error_classes() as exc:
         _raise_input_refusal(exc)
     if source_include:
@@ -343,7 +385,8 @@ def plan_huggingface(
         dtype_pref=tuple(dtype_preference or ("bf16", "fp16", "fp32")),
         gguf_quant=gguf_quant,
     )
-    bits = resolve_plan_source_width(classification, repo_id, rev, sizes, hf_token)
+    bits = resolve_plan_source_width(
+        classification, repo_id, rev, sizes, hf_token, ticker)
     return HFSourcePlan(
         repo_id=repo_id, revision=sha, paths=paths, sizes=sizes, side=side,
         classification=classification, content_ids=content_ids,
@@ -357,6 +400,7 @@ def resolve_plan_source_width(
     revision: str | None,
     sizes: Mapping[str, int],
     hf_token: str | None,
+    ticker: PlanTicker | None = None,
 ) -> int:
     """Read the selected weight set's real storage width off its safetensors headers; stamp the dtype when the filename heuristic came up empty, and return bits-per-parameter for the disk estimate."""
     selected = sorted(
@@ -368,7 +412,7 @@ def resolve_plan_source_width(
         return 0
     try:
         dtype, bits = _remote_safetensors_width(
-            repo_id, revision, selected, hf_token)
+            repo_id, revision, selected, hf_token, ticker)
     except Exception:  # noqa: BLE001 — an unresolvable width is not a refusal
         return 0
     if dtype and not str(classification.attrs.get("dtype") or "").strip():
@@ -379,14 +423,24 @@ def resolve_plan_source_width(
 def plan_civitai(
     model_version_id: int, *, civitai_api_key: str | None = None,
     gguf_quant: str | None = None,
+    progress: ProgressFn | None = None,
 ) -> CivitaiSourcePlan:
-    """Fetch one civitai model version's metadata (no downloads)."""
+    """Fetch one civitai model version's metadata (no downloads).
+
+    ``progress`` is ticked once per completed remote metadata item, on the same
+    contract as :func:`plan_huggingface` (pgw#1667). A civitai version is one
+    API call and one selection, so it is two ticks — but the phase says so
+    rather than declaring nothing.
+    """
 
     version_id = int(model_version_id or 0)
     if version_id <= 0:
         raise ValueError("civitai_model_version_id is required")
+    ticker = PlanTicker(progress)
     payload = fetch_civitai_model_version(version_id, api_key=(civitai_api_key or ""))
+    ticker.tick()
     files = _civitai_select_files(payload, gguf_quant=gguf_quant)
+    ticker.tick()
     return CivitaiSourcePlan(
         version_id=version_id,
         payload=payload,
