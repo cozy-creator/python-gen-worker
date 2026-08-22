@@ -158,7 +158,7 @@ class ServeAdoption:
         )
 
     def _build(self, lane: Any) -> None:
-        from .._vendor.torchcg.adopt import AdoptSession
+        from ..graphs.adopt import AdoptSession
         from ..env_identity import installed_stack_drift
         from .mint_store import graph_store
         from .hub_store import (

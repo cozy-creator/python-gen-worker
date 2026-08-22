@@ -235,6 +235,29 @@ def unpack(artifact: Path, destination: Path) -> Path:
     return destination
 
 
+def open_artifact(envelope: Path, destination: Path) -> StoredArtifact:
+    """Unpack one artifact envelope that came from somewhere else.
+
+    The seam for a caller with its OWN transport -- a hub fetch, a baked image
+    layer, a pre-staged volume -- which holds the bytes but never put them in
+    this store. It gets the same unpack-and-verify `get` performs, so an
+    artifact that arrived by another road is admitted on the same terms.
+
+    The key is READ from the bytes rather than supplied: this path has no
+    address to check against, so claiming one would be inventing it. Verify it
+    against an expected key with `adopt.load(..., key=)`.
+    """
+
+    directory = unpack(Path(envelope), Path(destination))
+    stamped = read_metadata(directory)
+    return StoredArtifact(
+        key=str(stamped.get("key") or ""),
+        directory=directory,
+        metadata=stamped,
+        ref=_digest_file(Path(envelope)),
+    )
+
+
 def read_metadata(directory: Path) -> dict[str, Any]:
     try:
         stamped = json.loads((directory / "metadata.json").read_text())
@@ -272,6 +295,7 @@ __all__ = [
     "Store",
     "StoreError",
     "StoredArtifact",
+    "open_artifact",
     "pack",
     "read_metadata",
     "unpack",
